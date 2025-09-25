@@ -32,7 +32,7 @@ function salvarFichas() {
 }
 carregarFichas();
 
-// 📌 Função auxiliar para pegar ficha
+// 📌 Helpers
 function getFicha(chatId, userId) {
   if (!fichas[chatId]) fichas[chatId] = {};
   return fichas[chatId][userId];
@@ -60,6 +60,7 @@ bot.start((ctx) => {
         [Markup.button.callback("🎲 Rolar dado", "ROLAR_DADO")],
         [Markup.button.callback("✨ Magia", "MAGIA"), Markup.button.callback("👹 Monstro", "MONSTRO")],
         [Markup.button.callback("❤️ Dano", "DANO"), Markup.button.callback("💊 Cura", "CURA")],
+        [Markup.button.callback("🎭 Narrar", "NARRAR")],
         [Markup.button.callback("ℹ️ Ajuda", "AJUDA")]
       ])
     }
@@ -78,7 +79,8 @@ bot.command("ajuda", (ctx) => {
     "4️⃣ /rolar 1d20+5 → Rola dados\n" +
     "5️⃣ /magia bola de fogo → Consulta magia\n" +
     "6️⃣ /monstro goblin → Consulta monstro\n" +
-    "7️⃣ /dano 5 ou /cura 3 → Gerencia PV\n\n" +
+    "7️⃣ /dano 5 ou /cura 3 → Gerencia PV\n" +
+    "8️⃣ /narrar <texto> → Mensagem destacada do Mestre\n\n" +
     "⚔️ Cada grupo tem suas próprias fichas.\n" +
     "✅ Assim você pode jogar em várias mesas sem misturar personagens."
   );
@@ -208,7 +210,18 @@ bot.command('cura', (ctx) => {
 });
 
 //
-// 📌 Botões (atalhos)
+// 🎭 /narrar (Mestre)
+//
+bot.command('narrar', (ctx) => {
+  const texto = ctx.message.text.split(' ').slice(1).join(' ');
+  if (!texto) return ctx.reply("⚠️ Use: /narrar <texto>");
+  ctx.replyWithMarkdown(
+    `📢 *NARRAÇÃO*\n\n${texto}\n\n🎭 Mestre: ${ctx.from.first_name}`
+  );
+});
+
+//
+// 📌 Botões
 //
 bot.action("CRIAR_FICHA", (ctx) => ctx.reply("📜 Use: /criarficha <nome>"));
 bot.action("VER_FICHA", (ctx) => ctx.reply("👤 Digite /ficha"));
@@ -217,6 +230,7 @@ bot.action("MAGIA", (ctx) => ctx.reply("✨ Use: /magia <nome>"));
 bot.action("MONSTRO", (ctx) => ctx.reply("👹 Use: /monstro <nome>"));
 bot.action("DANO", (ctx) => ctx.reply("💔 Use: /dano <valor>"));
 bot.action("CURA", (ctx) => ctx.reply("💖 Use: /cura <valor>"));
+bot.action("NARRAR", (ctx) => ctx.reply("🎭 Use: /narrar <texto>"));
 bot.action("AJUDA", (ctx) => ctx.reply("ℹ️ Digite /ajuda"));
 
 //
