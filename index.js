@@ -2,6 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const { DiceRoll } = require('@dice-roller/rpg-dice-roller');
 const { Telegraf } = require('telegraf');
+const fs = require('fs');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) {
@@ -10,8 +11,30 @@ if (!BOT_TOKEN) {
 
 const bot = new Telegraf(BOT_TOKEN);
 
-// 📌 Cache em memória para fichas
-const fichas = {}; // { userId: { nome, pv, forca, destreza, inteligencia, inventario: [] } }
+// 📌 Carregar fichas do arquivo
+let fichas = {};
+const FICHAS_FILE = './fichas.json';
+
+function carregarFichas() {
+  try {
+    if (fs.existsSync(FICHAS_FILE)) {
+      fichas = JSON.parse(fs.readFileSync(FICHAS_FILE, 'utf-8'));
+      console.log("📂 Fichas carregadas do arquivo.");
+    }
+  } catch (e) {
+    console.error("❌ Erro ao carregar fichas:", e.message);
+  }
+}
+
+function salvarFichas() {
+  try {
+    fs.writeFileSync(FICHAS_FILE, JSON.stringify(fichas, null, 2));
+  } catch (e) {
+    console.error("❌ Erro ao salvar fichas:", e.message);
+  }
+}
+
+carregarFichas();
 
 // ▶️ /start
 bot.start((ctx) => {
@@ -72,7 +95,8 @@ bot.command('criarficha', (ctx) => {
     inventario: []
   };
 
-  ctx.reply(`📜 Ficha criada para *${nome}*!\nUse /ficha para ver seus status.`, { parse_mode: 'Markdown' });
+  salvarFichas();
+  ctx.reply(`📜 Ficha criada para *${nome}*! Use /ficha para ver seus status.`, { parse_mode: 'Markdown' });
 });
 
 // 📜 /ficha
@@ -97,6 +121,7 @@ bot.command('additem', (ctx) => {
   if (!item) return ctx.reply('Use: /additem <nome do item>');
 
   fichas[userId].inventario.push(item);
+  salvarFichas();
   ctx.reply(`✅ Item *${item}* adicionado ao inventário de ${fichas[userId].nome}.`, { parse_mode: 'Markdown' });
 });
 
