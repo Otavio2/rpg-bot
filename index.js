@@ -13,6 +13,13 @@ const bot = new Telegraf(BOT_TOKEN);
 let fichas = {};
 const FICHAS_FILE = './fichas.json';
 
+// 📂 Banco de iniciativas
+let iniciativas = {};
+
+// 📂 Tutorial
+let tutorialUsuarios = {}; // chatId -> userId -> concluido
+
+// 📌 Funções de persistência
 function carregarFichas() {
   try {
     if (fs.existsSync(FICHAS_FILE)) {
@@ -42,56 +49,123 @@ function setFicha(chatId, userId, ficha) {
   fichas[chatId][userId] = ficha;
   salvarFichas();
 }
+function tutorialConcluido(chatId, userId) {
+  return tutorialUsuarios[chatId]?.[userId] === true;
+}
+function marcarTutorial(chatId, userId) {
+  if (!tutorialUsuarios[chatId]) tutorialUsuarios[chatId] = {};
+  tutorialUsuarios[chatId][userId] = true;
+}
 
-//
+// ========================================================
+// ▶️ Tutorial Interativo
+// ========================================================
+function iniciarTutorial(ctx) {
+  const chatId = ctx.chat.id;
+  const userId = ctx.from.id;
+  if (tutorialConcluido(chatId, userId)) return;
+
+  ctx.replyWithMarkdown(
+    "📖 *Tutorial RPG Bot*\n\nBem-vindo! Vamos aprender a jogar passo a passo.\nClique em *Próximo* para continuar.",
+    Markup.inlineKeyboard([[Markup.button.callback("Próximo", `TUT_1_${userId}`)]])
+  );
+}
+
+bot.action(/TUT_(\d+)_(\d+)/, (ctx) => {
+  const passo = parseInt(ctx.match[1]);
+  const userId = parseInt(ctx.match[2]);
+  const chatId = ctx.chat.id;
+
+  if (ctx.from.id !== userId) return ctx.answerCbQuery("Este tutorial não é seu!");
+
+  switch (passo) {
+    case 1:
+      ctx.editMessageText(
+        "1️⃣ Crie sua ficha de personagem:\n/criarficha NomeDoSeuPersonagem",
+        { parse_mode: "Markdown", ...Markup.inlineKeyboard([[Markup.button.callback("Próximo", `TUT_2_${userId}`)]]) }
+      );
+      break;
+    case 2:
+      ctx.editMessageText(
+        "2️⃣ Veja sua ficha a qualquer momento com:\n/ficha\nInclui PV, atributos e inventário.",
+        { parse_mode: "Markdown", ...Markup.inlineKeyboard([[Markup.button.callback("Próximo", `TUT_3_${userId}`)]]) }
+      );
+      break;
+    case 3:
+      ctx.editMessageText(
+        "3️⃣ Adicione itens ao seu inventário:\n/additem Espada\n/additem Poção",
+        { parse_mode: "Markdown", ...Markup.inlineKeyboard([[Markup.button.callback("Próximo", `TUT_4_${userId}`)]]) }
+      );
+      break;
+    case 4:
+      ctx.editMessageText(
+        "4️⃣ Rolar dados:\n/rolar 1d20+5\n/rolar 2d6+3\nO bot mostra o resultado automaticamente.",
+        { parse_mode: "Markdown", ...Markup.inlineKeyboard([[Markup.button.callback("Próximo", `TUT_5_${userId}`)]]) }
+      );
+      break;
+    case 5:
+      ctx.editMessageText(
+        "5️⃣ Consultar magias e monstros:\n/magia Bola de Fogo\n/monstro Goblin",
+        { parse_mode: "Markdown", ...Markup.inlineKeyboard([[Markup.button.callback("Próximo", `TUT_6_${userId}`)]]) }
+      );
+      break;
+    case 6:
+      ctx.editMessageText(
+        "6️⃣ Controle de PV:\n/dano 3 → aplica 3 de dano\n/cura 5 → recupera 5 PV",
+        { parse_mode: "Markdown", ...Markup.inlineKeyboard([[Markup.button.callback("Próximo", `TUT_7_${userId}`)]]) }
+      );
+      break;
+    case 7:
+      ctx.editMessageText(
+        "7️⃣ Mestre pode narrar eventos:\n/narrar O grupo entra na caverna escura...",
+        { parse_mode: "Markdown", ...Markup.inlineKeyboard([[Markup.button.callback("Próximo", `TUT_8_${userId}`)]]) }
+      );
+      break;
+    case 8:
+      ctx.editMessageText(
+        "8️⃣ Combate e iniciativa:\n/iniciativa → inicia combate\n/proximo → passa para o próximo turno",
+        { parse_mode: "Markdown", ...Markup.inlineKeyboard([[Markup.button.callback("Concluir Tutorial", `TUT_END_${userId}`)]]) }
+      );
+      break;
+  }
+});
+
+bot.action(/TUT_END_(\d+)/, (ctx) => {
+  const userId = parseInt(ctx.match[1]);
+  const chatId = ctx.chat.id;
+  if (ctx.from.id !== userId) return ctx.answerCbQuery("Este tutorial não é seu!");
+  marcarTutorial(chatId, userId);
+  ctx.editMessageText("✅ Tutorial concluído! Agora você está pronto para jogar. Digite /ajuda para rever todos os comandos.");
+});
+
+// ========================================================
 // ▶️ /start
-//
+// ========================================================
 bot.start((ctx) => {
   ctx.reply(
-    "🎲 Bem-vindo ao *RPG Bot*!\n\n" +
-    "Crie personagens, role dados, consulte magias e monstros de D&D 5e.\n" +
-    "Funciona em *PV* e em *grupos*, com fichas separadas para cada mesa.\n\n" +
-    "📌 Use os botões ou digite /ajuda para ver o guia.",
-    {
-      parse_mode: "Markdown",
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback("📜 Criar ficha", "CRIAR_FICHA")],
-        [Markup.button.callback("👤 Ver ficha", "VER_FICHA")],
-        [Markup.button.callback("🎲 Rolar dado", "ROLAR_DADO")],
-        [Markup.button.callback("✨ Magia", "MAGIA"), Markup.button.callback("👹 Monstro", "MONSTRO")],
-        [Markup.button.callback("❤️ Dano", "DANO"), Markup.button.callback("💊 Cura", "CURA")],
-        [Markup.button.callback("🎭 Narrar", "NARRAR")],
-        [Markup.button.callback("ℹ️ Ajuda", "AJUDA")]
-      ])
-    }
+    "🎲 Bem-vindo ao *RPG Bot*!\nUse /ajuda para ver os comandos.",
+    { parse_mode: "Markdown" }
   );
+  iniciarTutorial(ctx);
 });
 
-//
-// ❓ /ajuda
-//
+// ========================================================
+// ▶️ /ajuda
+// ========================================================
 bot.command("ajuda", (ctx) => {
   ctx.replyWithMarkdown(
-    "📖 *Guia do RPG Bot*\n\n" +
-    "1️⃣ /criarficha <nome> → Cria seu personagem\n" +
-    "2️⃣ /ficha → Mostra sua ficha\n" +
-    "3️⃣ /additem <item> → Adiciona item ao inventário\n" +
-    "4️⃣ /rolar 1d20+5 → Rola dados\n" +
-    "5️⃣ /magia bola de fogo → Consulta magia\n" +
-    "6️⃣ /monstro goblin → Consulta monstro\n" +
-    "7️⃣ /dano 5 ou /cura 3 → Gerencia PV\n" +
-    "8️⃣ /narrar <texto> → Mensagem destacada do Mestre\n\n" +
-    "⚔️ Cada grupo tem suas próprias fichas.\n" +
-    "✅ Assim você pode jogar em várias mesas sem misturar personagens."
+    "*📖 Guia completo do RPG Bot*\n\n" +
+    "1️⃣ /criarficha <nome>\n2️⃣ /ficha\n3️⃣ /additem <item>\n4️⃣ /rolar <notação>\n5️⃣ /magia <nome>\n6️⃣ /monstro <nome>\n" +
+    "7️⃣ /dano <valor>\n8️⃣ /cura <valor>\n9️⃣ /narrar <texto>\n🔟 /iniciativa\n1️⃣1️⃣ /proximo"
   );
 });
 
-//
+// ========================================================
 // 🎲 /rolar
-//
+// ========================================================
 bot.command('rolar', (ctx) => {
   const args = ctx.message.text.split(' ').slice(1).join(' ');
-  if (!args) return ctx.reply("⚠️ Use assim: /rolar 1d20+5");
+  if (!args) return ctx.reply("⚠️ Use: /rolar 1d20+5");
   try {
     const roll = new DiceRoll(args);
     ctx.reply(`🎲 Rolagem: *${args}*\nResultado: *${roll.total}*\n${roll.output}`, { parse_mode: 'Markdown' });
@@ -100,9 +174,9 @@ bot.command('rolar', (ctx) => {
   }
 });
 
-//
+// ========================================================
 // ✨ /magia
-//
+// ========================================================
 bot.command('magia', async (ctx) => {
   const name = ctx.message.text.split(' ').slice(1).join(' ');
   if (!name) return ctx.reply("⚠️ Use: /magia <nome>");
@@ -115,9 +189,9 @@ bot.command('magia', async (ctx) => {
   }
 });
 
-//
+// ========================================================
 // 👹 /monstro
-//
+// ========================================================
 bot.command('monstro', async (ctx) => {
   const name = ctx.message.text.split(' ').slice(1).join(' ');
   if (!name) return ctx.reply("⚠️ Use: /monstro <nome>");
@@ -130,9 +204,9 @@ bot.command('monstro', async (ctx) => {
   }
 });
 
-//
+// ========================================================
 // 📝 /criarficha
-//
+// ========================================================
 bot.command('criarficha', (ctx) => {
   const chatId = ctx.chat.id;
   const userId = ctx.from.id;
@@ -147,26 +221,25 @@ bot.command('criarficha', (ctx) => {
     inventario: []
   });
   ctx.reply(`📜 Ficha criada para *${nome}*! Digite /ficha para ver.`, { parse_mode: 'Markdown' });
+  iniciarTutorial(ctx);
 });
 
-//
+// ========================================================
 // 📜 /ficha
-//
+// ========================================================
 bot.command('ficha', (ctx) => {
   const chatId = ctx.chat.id;
   const userId = ctx.from.id;
   const f = getFicha(chatId, userId);
   if (!f) return ctx.reply("❌ Você não tem uma ficha. Use /criarficha <nome>.");
   ctx.replyWithMarkdown(
-    `📜 *Ficha de ${f.nome}*\n\n` +
-    `❤️ PV: ${f.pv}\n💪 Força: ${f.forca}\n🏹 Destreza: ${f.destreza}\n🧠 Inteligência: ${f.inteligencia}\n\n` +
-    `🎒 Inventário: ${f.inventario.length ? f.inventario.join(', ') : 'vazio'}`
+    `📜 *Ficha de ${f.nome}*\n❤️ PV: ${f.pv}\n💪 Força: ${f.forca}\n🏹 Destreza: ${f.destreza}\n🧠 Inteligência: ${f.inteligencia}\n🎒 Inventário: ${f.inventario.length ? f.inventario.join(', ') : 'vazio'}`
   );
 });
 
-//
+// ========================================================
 // 🎒 /additem
-//
+// ========================================================
 bot.command('additem', (ctx) => {
   const chatId = ctx.chat.id;
   const userId = ctx.from.id;
@@ -179,9 +252,9 @@ bot.command('additem', (ctx) => {
   ctx.reply(`✅ Item *${item}* adicionado ao inventário de ${f.nome}.`, { parse_mode: 'Markdown' });
 });
 
-//
+// ========================================================
 // ❤️ /dano
-//
+// ========================================================
 bot.command('dano', (ctx) => {
   const chatId = ctx.chat.id;
   const userId = ctx.from.id;
@@ -194,9 +267,9 @@ bot.command('dano', (ctx) => {
   ctx.reply(`💔 ${f.nome} recebeu *${valor}* de dano.\nPV atual: *${f.pv}*`, { parse_mode: 'Markdown' });
 });
 
-//
+// ========================================================
 // 💊 /cura
-//
+// ========================================================
 bot.command('cura', (ctx) => {
   const chatId = ctx.chat.id;
   const userId = ctx.from.id;
@@ -209,33 +282,55 @@ bot.command('cura', (ctx) => {
   ctx.reply(`💖 ${f.nome} recuperou *${valor}* PV.\nPV atual: *${f.pv}*`, { parse_mode: 'Markdown' });
 });
 
-//
-// 🎭 /narrar (Mestre)
-//
+// ========================================================
+// 🎭 /narrar
+// ========================================================
 bot.command('narrar', (ctx) => {
   const texto = ctx.message.text.split(' ').slice(1).join(' ');
   if (!texto) return ctx.reply("⚠️ Use: /narrar <texto>");
-  ctx.replyWithMarkdown(
-    `📢 *NARRAÇÃO*\n\n${texto}\n\n🎭 Mestre: ${ctx.from.first_name}`
-  );
+  ctx.replyWithMarkdown(`📢 *NARRAÇÃO*\n\n${texto}\n\n🎭 Mestre: ${ctx.from.first_name}`);
 });
 
-//
-// 📌 Botões
-//
-bot.action("CRIAR_FICHA", (ctx) => ctx.reply("📜 Use: /criarficha <nome>"));
-bot.action("VER_FICHA", (ctx) => ctx.reply("👤 Digite /ficha"));
-bot.action("ROLAR_DADO", (ctx) => ctx.reply("🎲 Use: /rolar 1d20+5"));
-bot.action("MAGIA", (ctx) => ctx.reply("✨ Use: /magia <nome>"));
-bot.action("MONSTRO", (ctx) => ctx.reply("👹 Use: /monstro <nome>"));
-bot.action("DANO", (ctx) => ctx.reply("💔 Use: /dano <valor>"));
-bot.action("CURA", (ctx) => ctx.reply("💖 Use: /cura <valor>"));
-bot.action("NARRAR", (ctx) => ctx.reply("🎭 Use: /narrar <texto>"));
-bot.action("AJUDA", (ctx) => ctx.reply("ℹ️ Digite /ajuda"));
+// ========================================================
+// ⚔️ /iniciativa
+// ========================================================
+bot.command('iniciativa', (ctx) => {
+  const chatId = ctx.chat.id;
+  if (!fichas[chatId] || Object.keys(fichas[chatId]).length === 0) {
+    return ctx.reply("❌ Nenhuma ficha encontrada no grupo. Jogadores precisam criar ficha primeiro.");
+  }
 
-//
-// ⚙️ Render
-//
+  const ordens = [];
+  for (const userId in fichas[chatId]) {
+    const f = fichas[chatId][userId];
+    const roll = new DiceRoll('1d20+' + f.destreza);
+    ordens.push({ nome: f.nome, userId, total: roll.total });
+  }
+
+  ordens.sort((a, b) => b.total - a.total);
+  iniciativas[chatId] = { ordem: ordens, index: 0 };
+
+  let msg = "🎲 *Iniciativa do Combate:*\n";
+  ordens.forEach((j, i) => { msg += `${i + 1}️⃣ ${j.nome} → ${j.total}\n`; });
+  msg += "\n➡️ Use /proximo para passar o turno.";
+  ctx.reply(msg, { parse_mode: 'Markdown' });
+});
+
+// ========================================================
+// ⏭️ /proximo
+// ========================================================
+bot.command('proximo', (ctx) => {
+  const chatId = ctx.chat.id;
+  const ini = iniciativas[chatId];
+  if (!ini) return ctx.reply("❌ Nenhuma iniciativa ativa. Use /iniciativa primeiro.");
+  const jogadorAtual = ini.ordem[ini.index];
+  ctx.replyWithMarkdown(`🔹 Turno de *${jogadorAtual.nome}*`);
+  ini.index = (ini.index + 1) % ini.ordem.length;
+});
+
+// ========================================================
+// ⚙️ Render Webhook
+// ========================================================
 const app = express();
 app.use(bot.webhookCallback('/webhook'));
 const PORT = process.env.PORT || 3000;
