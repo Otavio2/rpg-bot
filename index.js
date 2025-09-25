@@ -11,7 +11,7 @@ if (!BOT_TOKEN) {
 
 const bot = new Telegraf(BOT_TOKEN);
 
-// 📌 Carregar fichas do arquivo
+// 📂 Arquivo de fichas
 let fichas = {};
 const FICHAS_FILE = './fichas.json';
 
@@ -130,12 +130,6 @@ const app = express();
 app.use(bot.webhookCallback('/webhook'));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, async () => {
-  const url = `https://${process.env.RENDER_EXTERNAL_URL || 'SEU-APP.onrender.com'}/webhook`;
-  try {
-    await bot.telegram.setWebhook(url);
-    console.log(`🚀 Bot rodando na porta ${PORT}, webhook registrado em ${url}`);
-  } catch (e) {
-    console.error('❌ Erro ao registrar webhook:', e.message);
-  }
+app.listen(PORT, () => {
+  console.log(`🚀 Bot rodando na porta ${PORT}`);
 });
