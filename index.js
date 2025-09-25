@@ -135,7 +135,7 @@ bot.action(/TUT_END_(\d+)/, (ctx) => {
   const chatId = ctx.chat.id;
   if (ctx.from.id !== userId) return ctx.answerCbQuery("Este tutorial não é seu!");
   marcarTutorial(chatId, userId);
-  ctx.editMessageText("✅ Tutorial concluído! Agora você está pronto para jogar. Digite /ajuda para rever todos os comandos.");
+  ctx.editMessageText("✅ Tutorial concluído! Agora você está pronto para jogar. Digite /ajuda para ver os comandos interativos.");
 });
 
 // ========================================================
@@ -143,20 +143,82 @@ bot.action(/TUT_END_(\d+)/, (ctx) => {
 // ========================================================
 bot.start((ctx) => {
   ctx.reply(
-    "🎲 Bem-vindo ao *RPG Bot*!\nUse /ajuda para ver os comandos.",
+    "🎲 Bem-vindo ao *RPG Bot*!\nUse /ajuda para ver os comandos interativos.",
     { parse_mode: "Markdown" }
   );
   iniciarTutorial(ctx);
 });
 
 // ========================================================
-// ▶️ /ajuda
+// ▶️ /ajuda Interativo
 // ========================================================
 bot.command("ajuda", (ctx) => {
-  ctx.replyWithMarkdown(
-    "*📖 Guia completo do RPG Bot*\n\n" +
-    "1️⃣ /criarficha <nome>\n2️⃣ /ficha\n3️⃣ /additem <item>\n4️⃣ /rolar <notação>\n5️⃣ /magia <nome>\n6️⃣ /monstro <nome>\n" +
-    "7️⃣ /dano <valor>\n8️⃣ /cura <valor>\n9️⃣ /narrar <texto>\n🔟 /iniciativa\n1️⃣1️⃣ /proximo"
+  ctx.reply(
+    "📖 *RPG Bot – Ajuda Interativa*\n\nEscolha uma categoria para ver os comandos:",
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("📜 Ficha", "HELP_FICHA")],
+        [Markup.button.callback("🎒 Inventário", "HELP_INV")],
+        [Markup.button.callback("🎲 Rolagens", "HELP_ROLAR")],
+        [Markup.button.callback("✨ Magias/Monstros", "HELP_MAGIA")],
+        [Markup.button.callback("❤️ PV/Dano/Cura", "HELP_PV")],
+        [Markup.button.callback("⚔️ Combate", "HELP_COMBATE")],
+        [Markup.button.callback("🎭 Narração", "HELP_NARRACAO")]
+      ])
+    }
+  );
+});
+
+bot.action(/HELP_(\w+)/, (ctx) => {
+  const cat = ctx.match[1];
+  let texto = "";
+
+  switch(cat) {
+    case "FICHA":
+      texto = "*📜 Ficha*\n• /criarficha <nome>\n• /ficha";
+      break;
+    case "INV":
+      texto = "*🎒 Inventário*\n• /additem <item>";
+      break;
+    case "ROLAR":
+      texto = "*🎲 Rolagens*\n• /rolar <notação>";
+      break;
+    case "MAGIA":
+      texto = "*✨ Magias/Monstros*\n• /magia <nome>\n• /monstro <nome>";
+      break;
+    case "PV":
+      texto = "*❤️ PV – Dano e Cura*\n• /dano <valor>\n• /cura <valor>";
+      break;
+    case "COMBATE":
+      texto = "*⚔️ Combate e Turnos*\n• /iniciativa\n• /proximo";
+      break;
+    case "NARRACAO":
+      texto = "*🎭 Narração*\n• /narrar <texto>";
+      break;
+  }
+
+  ctx.editMessageText(texto, {
+    parse_mode: "Markdown",
+    ...Markup.inlineKeyboard([[Markup.button.callback("🔙 Voltar", "HELP_BACK")]])
+  });
+});
+
+bot.action("HELP_BACK", (ctx) => {
+  ctx.editMessageText(
+    "📖 *RPG Bot – Ajuda Interativa*\n\nEscolha uma categoria para ver os comandos:",
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("📜 Ficha", "HELP_FICHA")],
+        [Markup.button.callback("🎒 Inventário", "HELP_INV")],
+        [Markup.button.callback("🎲 Rolagens", "HELP_ROLAR")],
+        [Markup.button.callback("✨ Magias/Monstros", "HELP_MAGIA")],
+        [Markup.button.callback("❤️ PV/Dano/Cura", "HELP_PV")],
+        [Markup.button.callback("⚔️ Combate", "HELP_COMBATE")],
+        [Markup.button.callback("🎭 Narração", "HELP_NARRACAO")]
+      ])
+    }
   );
 });
 
