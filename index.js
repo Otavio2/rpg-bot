@@ -1,160 +1,37 @@
-const express = require('express');
-const axios = require('axios');
-const { DiceRoll } = require('@dice-roller/rpg-dice-roller');
-const { Telegraf, Markup } = require('telegraf');
-const fs = require('fs');
+const express = require("express");
+const { Telegraf, Markup } = require("telegraf");
+const axios = require("axios");
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-if (!BOT_TOKEN) throw new Error("⚠️ Defina BOT_TOKEN com o token do bot.");
+const BOT_TOKEN = process.env.BOT_TOKEN || "SEU_TOKEN_AQUI";
+const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
+
+if (!BOT_TOKEN) {
+  throw new Error("❌ BOT_TOKEN não configurado!");
+}
 
 const bot = new Telegraf(BOT_TOKEN);
+const app = express();
 
-// 📂 Banco de fichas
-let fichas = {};
-const FICHAS_FILE = './fichas.json';
+// ===============================
+// ARMAZENAMENTO SIMPLES
+// ===============================
+const fichas = {};
+const combates = {};
 
-// 📂 Banco de iniciativas
-let iniciativas = {};
-
-// 📂 Tutorial
-let tutorialUsuarios = {}; // chatId -> userId -> concluido
-
-// 📌 Funções de persistência
-function carregarFichas() {
-  try {
-    if (fs.existsSync(FICHAS_FILE)) {
-      fichas = JSON.parse(fs.readFileSync(FICHAS_FILE, 'utf-8'));
-      console.log("📂 Fichas carregadas.");
-    }
-  } catch (e) {
-    console.error("❌ Erro ao carregar fichas:", e.message);
-  }
-}
-function salvarFichas() {
-  try {
-    fs.writeFileSync(FICHAS_FILE, JSON.stringify(fichas, null, 2));
-  } catch (e) {
-    console.error("❌ Erro ao salvar fichas:", e.message);
-  }
-}
-carregarFichas();
-
-// 📌 Helpers
-function getFicha(chatId, userId) {
-  if (!fichas[chatId]) fichas[chatId] = {};
-  return fichas[chatId][userId];
-}
-function setFicha(chatId, userId, ficha) {
-  if (!fichas[chatId]) fichas[chatId] = {};
-  fichas[chatId][userId] = ficha;
-  salvarFichas();
-}
-function tutorialConcluido(chatId, userId) {
-  return tutorialUsuarios[chatId]?.[userId] === true;
-}
-function marcarTutorial(chatId, userId) {
-  if (!tutorialUsuarios[chatId]) tutorialUsuarios[chatId] = {};
-  tutorialUsuarios[chatId][userId] = true;
-}
-
-// ========================================================
-// ▶️ Tutorial Interativo
-// ========================================================
-function iniciarTutorial(ctx) {
-  const chatId = ctx.chat.id;
-  const userId = ctx.from.id;
-  if (tutorialConcluido(chatId, userId)) return;
-
-  ctx.replyWithMarkdown(
-    "📖 *Tutorial RPG Bot*\n\nBem-vindo! Vamos aprender a jogar passo a passo.\nClique em *Próximo* para continuar.",
-    Markup.inlineKeyboard([[Markup.button.callback("Próximo", `TUT_1_${userId}`)]])
-  );
-}
-
-bot.action(/TUT_(\d+)_(\d+)/, (ctx) => {
-  const passo = parseInt(ctx.match[1]);
-  const userId = parseInt(ctx.match[2]);
-  const chatId = ctx.chat.id;
-
-  if (ctx.from.id !== userId) return ctx.answerCbQuery("Este tutorial não é seu!");
-
-  switch (passo) {
-    case 1:
-      ctx.editMessageText(
-        "1️⃣ Crie sua ficha de personagem:\n/criarficha NomeDoSeuPersonagem",
-        { parse_mode: "Markdown", ...Markup.inlineKeyboard([[Markup.button.callback("Próximo", `TUT_2_${userId}`)]]) }
-      );
-      break;
-    case 2:
-      ctx.editMessageText(
-        "2️⃣ Veja sua ficha a qualquer momento com:\n/ficha\nInclui PV, atributos e inventário.",
-        { parse_mode: "Markdown", ...Markup.inlineKeyboard([[Markup.button.callback("Próximo", `TUT_3_${userId}`)]]) }
-      );
-      break;
-    case 3:
-      ctx.editMessageText(
-        "3️⃣ Adicione itens ao seu inventário:\n/additem Espada\n/additem Poção",
-        { parse_mode: "Markdown", ...Markup.inlineKeyboard([[Markup.button.callback("Próximo", `TUT_4_${userId}`)]]) }
-      );
-      break;
-    case 4:
-      ctx.editMessageText(
-        "4️⃣ Rolar dados:\n/rolar 1d20+5\n/rolar 2d6+3\nO bot mostra o resultado automaticamente.",
-        { parse_mode: "Markdown", ...Markup.inlineKeyboard([[Markup.button.callback("Próximo", `TUT_5_${userId}`)]]) }
-      );
-      break;
-    case 5:
-      ctx.editMessageText(
-        "5️⃣ Consultar magias e monstros:\n/magia Bola de Fogo\n/monstro Goblin",
-        { parse_mode: "Markdown", ...Markup.inlineKeyboard([[Markup.button.callback("Próximo", `TUT_6_${userId}`)]]) }
-      );
-      break;
-    case 6:
-      ctx.editMessageText(
-        "6️⃣ Controle de PV:\n/dano 3 → aplica 3 de dano\n/cura 5 → recupera 5 PV",
-        { parse_mode: "Markdown", ...Markup.inlineKeyboard([[Markup.button.callback("Próximo", `TUT_7_${userId}`)]]) }
-      );
-      break;
-    case 7:
-      ctx.editMessageText(
-        "7️⃣ Mestre pode narrar eventos:\n/narrar O grupo entra na caverna escura...",
-        { parse_mode: "Markdown", ...Markup.inlineKeyboard([[Markup.button.callback("Próximo", `TUT_8_${userId}`)]]) }
-      );
-      break;
-    case 8:
-      ctx.editMessageText(
-        "8️⃣ Combate e iniciativa:\n/iniciativa → inicia combate\n/proximo → passa para o próximo turno",
-        { parse_mode: "Markdown", ...Markup.inlineKeyboard([[Markup.button.callback("Concluir Tutorial", `TUT_END_${userId}`)]]) }
-      );
-      break;
-  }
+// ===============================
+// ROTA PRINCIPAL
+// ===============================
+app.get("/", (req, res) => {
+  res.send("🤖 RPG Bot está rodando perfeitamente!");
 });
 
-bot.action(/TUT_END_(\d+)/, (ctx) => {
-  const userId = parseInt(ctx.match[1]);
-  const chatId = ctx.chat.id;
-  if (ctx.from.id !== userId) return ctx.answerCbQuery("Este tutorial não é seu!");
-  marcarTutorial(chatId, userId);
-  ctx.editMessageText("✅ Tutorial concluído! Agora você está pronto para jogar. Digite /ajuda para ver os comandos interativos.");
-});
-
-// ========================================================
-// ▶️ /start
-// ========================================================
-bot.start((ctx) => {
-  ctx.reply(
-    "🎲 Bem-vindo ao *RPG Bot*!\nUse /ajuda para ver os comandos interativos.",
-    { parse_mode: "Markdown" }
-  );
-  iniciarTutorial(ctx);
-});
-
-// ========================================================
-// ▶️ /ajuda Interativo
-// ========================================================
+// ===============================
+// AJUDA INTERATIVA
+// ===============================
 bot.command("ajuda", (ctx) => {
   ctx.reply(
-    "📖 *RPG Bot – Ajuda Interativa*\n\nEscolha uma categoria para ver os comandos:",
+    "📖 *RPG Bot – Ajuda Interativa*\n\n" +
+    "Escolha uma categoria para ver os comandos:",
     {
       parse_mode: "Markdown",
       ...Markup.inlineKeyboard([
@@ -176,25 +53,36 @@ bot.action(/HELP_(\w+)/, (ctx) => {
 
   switch(cat) {
     case "FICHA":
-      texto = "*📜 Ficha*\n• /criarficha <nome>\n• /ficha";
+      texto = "*📜 Ficha*\n" +
+              "• /criarficha <nome> → Cria sua ficha\n" +
+              "• /ficha → Mostra sua ficha atual";
       break;
     case "INV":
-      texto = "*🎒 Inventário*\n• /additem <item>";
+      texto = "*🎒 Inventário*\n" +
+              "• /additem <item> → Adiciona item ao inventário";
       break;
     case "ROLAR":
-      texto = "*🎲 Rolagens*\n• /rolar <notação>";
+      texto = "*🎲 Rolagens*\n" +
+              "• /rolar <notação> → Rola dados (ex: 1d20+5)";
       break;
     case "MAGIA":
-      texto = "*✨ Magias/Monstros*\n• /magia <nome>\n• /monstro <nome>";
+      texto = "*✨ Magias e Monstros*\n" +
+              "• /magia <nome> → Consulta magia\n" +
+              "• /monstro <nome> → Consulta monstro";
       break;
     case "PV":
-      texto = "*❤️ PV – Dano e Cura*\n• /dano <valor>\n• /cura <valor>";
+      texto = "*❤️ PV – Dano e Cura*\n" +
+              "• /dano <valor> → Aplica dano\n" +
+              "• /cura <valor> → Recupera PV";
       break;
     case "COMBATE":
-      texto = "*⚔️ Combate e Turnos*\n• /iniciativa\n• /proximo";
+      texto = "*⚔️ Combate e Turnos*\n" +
+              "• /iniciativa → Inicia combate\n" +
+              "• /proximo → Passa para o próximo turno";
       break;
     case "NARRACAO":
-      texto = "*🎭 Narração*\n• /narrar <texto>";
+      texto = "*🎭 Narração*\n" +
+              "• /narrar <texto> → Mestre narra eventos";
       break;
   }
 
@@ -222,178 +110,163 @@ bot.action("HELP_BACK", (ctx) => {
   );
 });
 
-// ========================================================
-// 🎲 /rolar
-// ========================================================
-bot.command('rolar', (ctx) => {
-  const args = ctx.message.text.split(' ').slice(1).join(' ');
-  if (!args) return ctx.reply("⚠️ Use: /rolar 1d20+5");
-  try {
-    const roll = new DiceRoll(args);
-    ctx.reply(`🎲 Rolagem: *${args}*\nResultado: *${roll.total}*\n${roll.output}`, { parse_mode: 'Markdown' });
-  } catch {
-    ctx.reply("❌ Notação inválida. Exemplo: /rolar 2d6+3");
-  }
+// ===============================
+// FICHAS
+// ===============================
+bot.command("criarficha", (ctx) => {
+  const userId = ctx.from.id;
+  const nome = ctx.message.text.split(" ").slice(1).join(" ");
+  if (!nome) return ctx.reply("❌ Use: /criarficha <nome>");
+  fichas[userId] = { nome, pv: 100, inventario: [] };
+  ctx.reply(`✅ Ficha criada para *${nome}* com 100 PV.`, { parse_mode: "Markdown" });
 });
 
-// ========================================================
-// ✨ /magia
-// ========================================================
-bot.command('magia', async (ctx) => {
-  const name = ctx.message.text.split(' ').slice(1).join(' ');
-  if (!name) return ctx.reply("⚠️ Use: /magia <nome>");
+bot.command("ficha", (ctx) => {
+  const userId = ctx.from.id;
+  const ficha = fichas[userId];
+  if (!ficha) return ctx.reply("❌ Você não tem uma ficha. Use /criarficha <nome>.");
+  ctx.reply(
+    `📜 *Ficha de ${ficha.nome}*\n❤️ PV: ${ficha.pv}\n🎒 Inventário: ${ficha.inventario.join(", ") || "vazio"}`,
+    { parse_mode: "Markdown" }
+  );
+});
+
+bot.command("additem", (ctx) => {
+  const userId = ctx.from.id;
+  const ficha = fichas[userId];
+  if (!ficha) return ctx.reply("❌ Crie uma ficha primeiro com /criarficha <nome>.");
+  const item = ctx.message.text.split(" ").slice(1).join(" ");
+  if (!item) return ctx.reply("❌ Use: /additem <item>");
+  ficha.inventario.push(item);
+  ctx.reply(`🎒 Item *${item}* adicionado ao inventário.`, { parse_mode: "Markdown" });
+});
+
+// ===============================
+// ROLAGEM DE DADOS
+// ===============================
+bot.command("rolar", (ctx) => {
+  const input = ctx.message.text.split(" ")[1];
+  if (!input) return ctx.reply("❌ Use: /rolar <notação>, ex: /rolar 1d20+5");
+
+  const match = input.match(/(\d*)d(\d+)([+-]\d+)?/i);
+  if (!match) return ctx.reply("❌ Notação inválida. Ex: 2d6+3");
+
+  const qtd = parseInt(match[1]) || 1;
+  const faces = parseInt(match[2]);
+  const mod = parseInt(match[3]) || 0;
+
+  let total = 0;
+  let rolls = [];
+  for (let i = 0; i < qtd; i++) {
+    const r = Math.floor(Math.random() * faces) + 1;
+    rolls.push(r);
+    total += r;
+  }
+  total += mod;
+
+  ctx.reply(`🎲 Rolagem: ${input}\n👉 [${rolls.join(", ")}] ${mod ? (mod > 0 ? "+"+mod : mod) : ""}\n✨ Total = *${total}*`, { parse_mode: "Markdown" });
+});
+
+// ===============================
+// MAGIAS E MONSTROS (API aberta)
+// ===============================
+bot.command("magia", async (ctx) => {
+  const nome = ctx.message.text.split(" ").slice(1).join(" ");
+  if (!nome) return ctx.reply("❌ Use: /magia <nome da magia>");
+
   try {
-    const url = `https://www.dnd5eapi.co/api/spells/${name.toLowerCase().replace(/ /g, '-')}`;
-    const { data } = await axios.get(url);
-    ctx.replyWithMarkdown(`✨ *${data.name}*\nEscola: ${data.school.name}\n\n${data.desc.join('\n')}`);
+    const res = await axios.get(`https://www.dnd5eapi.co/api/spells/${nome.toLowerCase()}`);
+    ctx.reply(`✨ *${res.data.name}*\n\n${res.data.desc.join("\n")}`, { parse_mode: "Markdown" });
   } catch {
     ctx.reply("❌ Magia não encontrada.");
   }
 });
 
-// ========================================================
-// 👹 /monstro
-// ========================================================
-bot.command('monstro', async (ctx) => {
-  const name = ctx.message.text.split(' ').slice(1).join(' ');
-  if (!name) return ctx.reply("⚠️ Use: /monstro <nome>");
+bot.command("monstro", async (ctx) => {
+  const nome = ctx.message.text.split(" ").slice(1).join(" ");
+  if (!nome) return ctx.reply("❌ Use: /monstro <nome do monstro>");
+
   try {
-    const url = `https://www.dnd5eapi.co/api/monsters/${name.toLowerCase().replace(/ /g, '-')}`;
-    const { data } = await axios.get(url);
-    ctx.replyWithMarkdown(`👹 *${data.name}*\nTipo: ${data.type}\nPV: ${data.hit_points}\nCA: ${data.armor_class}`);
+    const res = await axios.get(`https://www.dnd5eapi.co/api/monsters/${nome.toLowerCase()}`);
+    ctx.reply(`👹 *${res.data.name}*\n\nHP: ${res.data.hit_points}\nAC: ${res.data.armor_class[0].value}`, { parse_mode: "Markdown" });
   } catch {
     ctx.reply("❌ Monstro não encontrado.");
   }
 });
 
-// ========================================================
-// 📝 /criarficha
-// ========================================================
-bot.command('criarficha', (ctx) => {
-  const chatId = ctx.chat.id;
+// ===============================
+// PV: DANO E CURA
+// ===============================
+bot.command("dano", (ctx) => {
   const userId = ctx.from.id;
-  const nome = ctx.message.text.split(' ').slice(1).join(' ');
-  if (!nome) return ctx.reply("⚠️ Use: /criarficha <nome>");
-  setFicha(chatId, userId, {
-    nome,
-    pv: 10,
-    forca: 10,
-    destreza: 10,
-    inteligencia: 10,
-    inventario: []
-  });
-  ctx.reply(`📜 Ficha criada para *${nome}*! Digite /ficha para ver.`, { parse_mode: 'Markdown' });
-  iniciarTutorial(ctx);
+  const ficha = fichas[userId];
+  if (!ficha) return ctx.reply("❌ Crie uma ficha primeiro com /criarficha <nome>.");
+  const valor = parseInt(ctx.message.text.split(" ")[1]);
+  if (!valor) return ctx.reply("❌ Use: /dano <valor>");
+  ficha.pv -= valor;
+  if (ficha.pv < 0) ficha.pv = 0;
+  ctx.reply(`💔 ${ficha.nome} recebeu ${valor} de dano. PV atual: ${ficha.pv}`);
 });
 
-// ========================================================
-// 📜 /ficha
-// ========================================================
-bot.command('ficha', (ctx) => {
-  const chatId = ctx.chat.id;
+bot.command("cura", (ctx) => {
   const userId = ctx.from.id;
-  const f = getFicha(chatId, userId);
-  if (!f) return ctx.reply("❌ Você não tem uma ficha. Use /criarficha <nome>.");
-  ctx.replyWithMarkdown(
-    `📜 *Ficha de ${f.nome}*\n❤️ PV: ${f.pv}\n💪 Força: ${f.forca}\n🏹 Destreza: ${f.destreza}\n🧠 Inteligência: ${f.inteligencia}\n🎒 Inventário: ${f.inventario.length ? f.inventario.join(', ') : 'vazio'}`
-  );
+  const ficha = fichas[userId];
+  if (!ficha) return ctx.reply("❌ Crie uma ficha primeiro com /criarficha <nome>.");
+  const valor = parseInt(ctx.message.text.split(" ")[1]);
+  if (!valor) return ctx.reply("❌ Use: /cura <valor>");
+  ficha.pv += valor;
+  ctx.reply(`💚 ${ficha.nome} recuperou ${valor} PV. PV atual: ${ficha.pv}`);
 });
 
-// ========================================================
-// 🎒 /additem
-// ========================================================
-bot.command('additem', (ctx) => {
+// ===============================
+// COMBATE: INICIATIVA
+// ===============================
+bot.command("iniciativa", (ctx) => {
   const chatId = ctx.chat.id;
-  const userId = ctx.from.id;
-  const f = getFicha(chatId, userId);
-  if (!f) return ctx.reply("❌ Crie uma ficha primeiro com /criarficha <nome>.");
-  const item = ctx.message.text.split(' ').slice(1).join(' ');
-  if (!item) return ctx.reply("⚠️ Use: /additem <item>");
-  f.inventario.push(item);
-  setFicha(chatId, userId, f);
-  ctx.reply(`✅ Item *${item}* adicionado ao inventário de ${f.nome}.`, { parse_mode: 'Markdown' });
-});
+  combates[chatId] = { ordem: [], turno: 0 };
 
-// ========================================================
-// ❤️ /dano
-// ========================================================
-bot.command('dano', (ctx) => {
-  const chatId = ctx.chat.id;
-  const userId = ctx.from.id;
-  const f = getFicha(chatId, userId);
-  if (!f) return ctx.reply("❌ Crie uma ficha primeiro com /criarficha <nome>.");
-  const valor = parseInt(ctx.message.text.split(' ')[1]);
-  if (isNaN(valor) || valor <= 0) return ctx.reply("⚠️ Use: /dano <valor>");
-  f.pv = Math.max(0, f.pv - valor);
-  setFicha(chatId, userId, f);
-  ctx.reply(`💔 ${f.nome} recebeu *${valor}* de dano.\nPV atual: *${f.pv}*`, { parse_mode: 'Markdown' });
-});
-
-// ========================================================
-// 💊 /cura
-// ========================================================
-bot.command('cura', (ctx) => {
-  const chatId = ctx.chat.id;
-  const userId = ctx.from.id;
-  const f = getFicha(chatId, userId);
-  if (!f) return ctx.reply("❌ Crie uma ficha primeiro com /criarficha <nome>.");
-  const valor = parseInt(ctx.message.text.split(' ')[1]);
-  if (isNaN(valor) || valor <= 0) return ctx.reply("⚠️ Use: /cura <valor>");
-  f.pv += valor;
-  setFicha(chatId, userId, f);
-  ctx.reply(`💖 ${f.nome} recuperou *${valor}* PV.\nPV atual: *${f.pv}*`, { parse_mode: 'Markdown' });
-});
-
-// ========================================================
-// 🎭 /narrar
-// ========================================================
-bot.command('narrar', (ctx) => {
-  const texto = ctx.message.text.split(' ').slice(1).join(' ');
-  if (!texto) return ctx.reply("⚠️ Use: /narrar <texto>");
-  ctx.replyWithMarkdown(`📢 *NARRAÇÃO*\n\n${texto}\n\n🎭 Mestre: ${ctx.from.first_name}`);
-});
-
-// ========================================================
-// ⚔️ /iniciativa
-// ========================================================
-bot.command('iniciativa', (ctx) => {
-  const chatId = ctx.chat.id;
-  if (!fichas[chatId] || Object.keys(fichas[chatId]).length === 0) {
-    return ctx.reply("❌ Nenhuma ficha encontrada no grupo. Jogadores precisam criar ficha primeiro.");
+  for (const uid in fichas) {
+    const rolagem = Math.floor(Math.random() * 20) + 1;
+    combates[chatId].ordem.push({ nome: fichas[uid].nome, valor: rolagem });
   }
 
-  const ordens = [];
-  for (const userId in fichas[chatId]) {
-    const f = fichas[chatId][userId];
-    const roll = new DiceRoll('1d20+' + f.destreza);
-    ordens.push({ nome: f.nome, userId, total: roll.total });
-  }
-
-  ordens.sort((a, b) => b.total - a.total);
-  iniciativas[chatId] = { ordem: ordens, index: 0 };
-
-  let msg = "🎲 *Iniciativa do Combate:*\n";
-  ordens.forEach((j, i) => { msg += `${i + 1}️⃣ ${j.nome} → ${j.total}\n`; });
-  msg += "\n➡️ Use /proximo para passar o turno.";
-  ctx.reply(msg, { parse_mode: 'Markdown' });
+  combates[chatId].ordem.sort((a, b) => b.valor - a.valor);
+  ctx.reply("⚔️ Iniciativa:\n" + combates[chatId].ordem.map((p, i) => `${i+1}. ${p.nome} (${p.valor})`).join("\n"));
 });
 
-// ========================================================
-// ⏭️ /proximo
-// ========================================================
-bot.command('proximo', (ctx) => {
+bot.command("proximo", (ctx) => {
   const chatId = ctx.chat.id;
-  const ini = iniciativas[chatId];
-  if (!ini) return ctx.reply("❌ Nenhuma iniciativa ativa. Use /iniciativa primeiro.");
-  const jogadorAtual = ini.ordem[ini.index];
-  ctx.replyWithMarkdown(`🔹 Turno de *${jogadorAtual.nome}*`);
-  ini.index = (ini.index + 1) % ini.ordem.length;
+  const combate = combates[chatId];
+  if (!combate) return ctx.reply("❌ Nenhum combate em andamento. Use /iniciativa");
+
+  const atual = combate.ordem[combate.turno];
+  combate.turno = (combate.turno + 1) % combate.ordem.length;
+  ctx.reply(`👉 Turno de *${atual.nome}*`, { parse_mode: "Markdown" });
 });
 
-// ========================================================
-// ⚙️ Render Webhook
-// ========================================================
-const app = express();
-app.use(bot.webhookCallback('/webhook'));
+// ===============================
+// NARRAÇÃO
+// ===============================
+bot.command("narrar", (ctx) => {
+  const texto = ctx.message.text.split(" ").slice(1).join(" ");
+  if (!texto) return ctx.reply("❌ Use: /narrar <texto>");
+  ctx.reply(`🎭 *NARRAÇÃO*\n${texto}`, { parse_mode: "Markdown" });
+});
+
+// ===============================
+// WEBHOOK TELEGRAM
+// ===============================
+app.use(bot.webhookCallback("/webhook"));
+
+if (RENDER_URL) {
+  bot.telegram.setWebhook(`${RENDER_URL}/webhook`);
+  console.log("✅ Webhook configurado:", `${RENDER_URL}/webhook`);
+}
+
+// ===============================
+// INICIA SERVIDOR
+// ===============================
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Bot rodando na porta ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`🚀 Servidor rodando na porta ${PORT}`);
+});
