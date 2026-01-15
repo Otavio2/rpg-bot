@@ -1,4 +1,4 @@
 python-telegram-bot==20.7
-requests
-flask
-langdetect
+requests==2.32.3
+flask==3.0.2
+langid
