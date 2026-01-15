@@ -1,9 +1,9 @@
 import os
 import time
 import requests
+import langid
 from flask import Flask
 from threading import Thread
-from langdetect import detect
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -17,53 +17,37 @@ from telegram.ext import (
 # CONFIG
 # =====================
 TOKEN = os.getenv("BOT_TOKEN")
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN não definido")
+
 TEMPO_MAX_SESSAO = 300  # 5 minutos
 SESSOES = {}
 
 # =====================
-# FLASK (Render)
+# FLASK (Render keep-alive)
 # =====================
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "EduBot Universal Online"
+    return "EduBot Universal Online ✅"
 
 def run_flask():
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
 
-Thread(target=run_flask, daemon=True).start()
-
 # =====================
 # UTILIDADES
 # =====================
-def detectar_idioma(texto):
+def detectar_idioma(texto: str) -> str:
     try:
-        return detect(texto)
+        lang, _ = langid.classify(texto)
+        return lang
     except:
         return "pt"
 
 def dividir_texto(texto, limite=3800):
-    partes = []
-    while len(texto) > limite:
-        partes.append(texto[:limite])
-        texto = texto[limite:]
-    partes.append(texto)
-    return partes
+    return [texto[i:i + limite] for i in range(0, len(texto), limite)]
 
-def detectar_nivel(texto):
-    palavras_avancadas = [
-        "derivada", "integral", "mitose",
-        "democracia", "gravidade", "teorema",
-        "algoritmo", "constituição"
-    ]
-    if any(p in texto for p in palavras_avancadas):
-        return "📘 Nível: Ensino Médio / Superior\n\n"
-    return "📗 Nível: Ensino Fundamental / Médio\n\n"
-
-# =====================
-# SESSÃO LEVE
-# =====================
 def limpar_sessao(user_id):
     if user_id in SESSOES:
         if time.time() - SESSOES[user_id]["ultimo_uso"] > TEMPO_MAX_SESSAO:
@@ -75,13 +59,8 @@ def atualizar_sessao(user_id, tema):
         "ultimo_uso": time.time()
     }
 
-def tema_mudou(user_id, novo_tema):
-    if user_id not in SESSOES:
-        return True
-    return SESSOES[user_id]["tema"] != novo_tema
-
 # =====================
-# APIS MUNDIAIS
+# APIS
 # =====================
 def wikipedia_resumo(tema, lang):
     tema = tema.replace(" ", "_")
@@ -95,9 +74,7 @@ def wikipedia_resumo(tema, lang):
         return "❌ Conteúdo não encontrado."
 
     d = r.json()
-    nivel = detectar_nivel(d["title"].lower())
-
-    return f"{nivel}📘 *{d['title']}*\n\n{d['extract']}"
+    return f"📘 *{d['title']}*\n\n{d['extract']}"
 
 def definir(palavra):
     url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{palavra}"
@@ -129,14 +106,14 @@ def geo(lugar):
 # COMANDOS
 # =====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print("START OK")
     await update.message.reply_text(
         "🎓 *EduBot Universal*\n\n"
         "Pergunte naturalmente em qualquer idioma:\n"
         "• o que é fotossíntese\n"
         "• explain gravity\n"
-        "• ¿qué es la célula?\n"
         "• onde fica japão\n\n"
-        "Comandos opcionais:\n"
+        "Comandos:\n"
         "/explain tema\n"
         "/def palavra\n"
         "/geo lugar",
@@ -145,22 +122,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def explain(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tema = " ".join(context.args)
-    lang = detectar_idioma(tema)
-    resposta = wikipedia_resumo(tema, lang)
+    if not tema:
+        return
 
+    resposta = wikipedia_resumo(tema, detectar_idioma(tema))
     for parte in dividir_texto(resposta):
         await update.message.reply_text(parte, parse_mode="Markdown")
 
 async def cmd_def(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    palavra = context.args[0]
-    await update.message.reply_text(definir(palavra), parse_mode="Markdown")
+    if not context.args:
+        return
+    await update.message.reply_text(definir(context.args[0]), parse_mode="Markdown")
 
 async def cmd_geo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lugar = " ".join(context.args)
+    if not lugar:
+        return
     await update.message.reply_text(geo(lugar), parse_mode="Markdown")
 
 # =====================
-# AUTOMÁTICO COM SESSÃO
+# AUTOMÁTICO
 # =====================
 async def automatico(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -176,9 +157,7 @@ async def automatico(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if any(texto.startswith(g) for g in gatilhos):
         tema = texto.split(" ", 2)[-1]
-
-        if tema_mudou(user_id, tema):
-            atualizar_sessao(user_id, tema)
+        atualizar_sessao(user_id, tema)
 
         resposta = wikipedia_resumo(tema, detectar_idioma(texto))
         for parte in dividir_texto(resposta):
@@ -193,6 +172,8 @@ async def automatico(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MAIN
 # =====================
 def main():
+    Thread(target=run_flask, daemon=True).start()
+
     app_bot = ApplicationBuilder().token(TOKEN).build()
 
     app_bot.add_handler(CommandHandler("start", start))
@@ -200,10 +181,9 @@ def main():
     app_bot.add_handler(CommandHandler("explain", explain))
     app_bot.add_handler(CommandHandler("def", cmd_def))
     app_bot.add_handler(CommandHandler("geo", cmd_geo))
-
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, automatico))
 
-    app_bot.run_polling()
+    app_bot.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
