@@ -1,261 +1,613 @@
+import logging
 import os
-import requests
-from flask import Flask, request, jsonify
-from datetime import datetime, timedelta
-import pytz
-from apscheduler.schedulers.background import BackgroundScheduler
-import random
 import re
-import json
-import time
+
+import requests
+from flask import Flask, request
+
+from config import (
+    BOT_NAME,
+    CREATOR,
+    BOT_ID,
+    BOT_USERNAME,
+    TELEGRAM_TOKEN,
+    TELEGRAM_API_URL,
+    TIMEOUT_API,
+    BOT_TAG,
+)
+
+from ai import (
+    call_ai_smart,
+    extrair_dados_automaticos,
+)
+
+from database import (
+    save_message,
+    save_memory,
+)
+
+from media import (
+    analisar_midia_com_gemini,
+)
+
+from commands import (
+    handle_command,
+)
+
+from messages import (
+    responder_saudacao,
+    enviar_resposta,
+)
+
+from webhook import (
+    processar_webhook,
+)
+
+
+# ==========================================================
+# FLASK
+# ==========================================================
 
 app = Flask(__name__)
 
-# --- Variáveis de ambiente ---
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OWNER_ID = os.getenv("OWNER_ID")
-MEMORY_CHANNEL_ID = os.getenv("MEMORY_CHANNEL_ID")
-MEMORY_FILE = "memoria.json"
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(levelname)s: %(message)s"
+)
 
-GROQ_KEYS = [
-    os.getenv("GROQ_API_KEY_1"),
-    os.getenv("GROQ_API_KEY_2"),
-    os.getenv("GROQ_API_KEY_3"),
-]
+session = requests.Session()
 
-# --- Configurações ---
-BOT_NAME = "Hansel"
-CREATOR_NAME = "Kleber"
-BOT_USERNAME = "@NIOBIOchat_BOT"
-BOT_FIRST_NAME = "Hansel"
-BOT_ID = 123456789 # <-- PEGA SEU ID COM @userinfobot
 
-HISTORY_LIMIT = 30
-DEFAULT_TIMEZONE = "UTC"
-conversations = {}
-user_timezones = {}
-group_ids = set()
-group_languages = {}
-memory_cache = []
+# ==========================================================
+# CONTEXTO
+# ==========================================================
 
-# --- FILTRO ANTI CONTEÚDO +18 ---
-PALAVRAS_BLOQUEADAS = [
-    "porn", "sexo", "puta", "pinto", "buceta", "fuder", "gozar", "nudes", "hentai", "xxx"
-]
-def contem_conteudo_bloqueado(texto):
-    texto_lower = texto.lower()
-    return any(p in texto_lower for p in PALAVRAS_BLOQUEADAS)
+def montar_contexto(
+    user_id,
+    chat_id,
+    chat_type,
+    chat_title
+):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
 
-# --- MEMÓRIA INFINITA CORRIGIDA ---
-def salvar_memoria():
-    with open(MEMORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(memory_cache[-5000:], f, ensure_ascii=False, indent=2) # Aumentei pra 5000
+    hora = datetime.now(
+        ZoneInfo("America/Fortaleza")
+    )
 
-def ja_existe_na_memoria(user_id, user_msg, bot_reply):
-    if not memory_cache:
-        return False
-    ultimas = [i for i in memory_cache if str(i['user_id']) == str(user_id)][-5:]
-    for item in ultimas:
-        if item['user'].strip().lower() == user_msg.strip().lower() and item['bot'].strip().lower() == bot_reply.strip().lower():
-            return True
-    return False
+    dias = [
+        "segunda-feira",
+        "terça-feira",
+        "quarta-feira",
+        "quinta-feira",
+        "sexta-feira",
+        "sábado",
+        "domingo"
+    ]
 
-def carregar_memoria():
-    global memory_cache
-    if os.path.exists(MEMORY_FILE):
-        try:
-            with open(MEMORY_FILE, "r", encoding="utf-8") as f:
-                memory_cache = json.load(f)
-            print(f"Memória carregada do arquivo: {len(memory_cache)} itens")
-        except:
-            memory_cache = []
-            print("Erro ao carregar memoria.json")
+    meses = [
+        "janeiro",
+        "fevereiro",
+        "março",
+        "abril",
+        "maio",
+        "junho",
+        "julho",
+        "agosto",
+        "setembro",
+        "outubro",
+        "novembro",
+        "dezembro"
+    ]
+
+    dia_semana = dias[hora.weekday()]
+
+    data_atual = (
+        f"{hora.day} de "
+        f"{meses[hora.month - 1]} de "
+        f"{hora.year}"
+    )
+
+    hora_atual = hora.strftime("%H:%M")
+
+    if hora.hour >= 18:
+        saudacao = "Boa noite"
+    elif hora.hour < 12:
+        saudacao = "Bom dia"
     else:
-        print("Arquivo de memória não existe, começando do zero")
+        saudacao = "Boa tarde"
 
-def salvar_no_canal(user_id, user_msg, bot_reply, importante=False, chat_id=None):
-    if contem_conteudo_bloqueado(user_msg) or contem_conteudo_bloqueado(bot_reply):
-        print(f"Mensagem bloqueada, não salva: {user_id}")
-        return
-    if ja_existe_na_memoria(user_id, user_msg, bot_reply):
-        print(f"Mensagem repetida, ignorada: {user_id}")
-        return
+    prompt = f"""
+Você é {BOT_NAME}, criado por {CREATOR}.
 
-    item = {"user_id": user_id, "user": user_msg, "bot": bot_reply, "time": str(datetime.now()), "importante": importante, "chat_id": chat_id}
-    memory_cache.append(item)
-    salvar_memoria() # Salva no arquivo primeiro
+Data atual: {data_atual}
+Dia da semana: {dia_semana}
+Horário atual: {hora_atual}
 
-    # Envia pro canal como backup
-    if MEMORY_CHANNEL_ID:
-        tag = "\nIMPORTANTE" if importante else ""
-        texto = f"USER_ID: {user_id}\nUSER: {user_msg}\nBOT: {bot_reply}{tag}\n---"
-        try:
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                          json={"chat_id": MEMORY_CHANNEL_ID, "text": texto}, timeout=5)
-        except Exception as e:
-            print("Erro ao salvar no canal:", e)
+Considere sempre a data, o dia da semana
+e o horário acima ao responder.
 
-def gerar_resumo_usuario(user_id):
-    infos = [item for item in memory_cache if str(item['user_id']) == str(user_id)]
-    if not infos: return ""
-    # Prioriza mensagens importantes
-    importantes = [i for i in infos if i.get("importante")]
-    normais = [i for i in infos if not i.get("importante")][-15:]
-    texto = "\n".join([f"IMPORTANTE: {i['user']}" for i in importantes[-10:]] + [f"Usuário: {i['user']}" for i in normais])
-    if not texto: return ""
-    prompt = f"Resuma em 5 linhas o que você sabe sobre esta pessoa. Foque no que está marcado como IMPORTANTE: {texto}"
-    resumo = call_groq_api({"messages": [{"role": "user", "content": prompt}]}, model="llama-3.1-8b-instant")
-    return f"MEMÓRIA DO USUÁRIO: {resumo}\n" if resumo else ""
+Se receber uma descrição de sticker ou GIF,
+entenda o conteúdo e responda somente com texto.
 
-carregar_memoria() # Agora só carrega do arquivo
+Seja humano, direto, natural e amigável.
+Use gírias brasileiras leves quando combinarem.
+Responda normalmente sem dizer que é um robô.
 
-# --- SUPORTE ---
-def get_user_time(user_id):
-    tz_name = user_timezones.get(user_id, DEFAULT_TIMEZONE)
-    tz = pytz.timezone(tz_name)
-    return datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S %Z")
+Saudação atual: {saudacao}
+"""
 
-def should_add_time_info(user_msg):
-    return any(k in user_msg.lower() for k in ["hora", "horário", "data", "dia", "que horas"])
-
-def auto_manage_history(user_id):
-    history = conversations.get(user_id, [])
-    if len(history) > HISTORY_LIMIT:
-        conversations[user_id] = history[-HISTORY_LIMIT:]
-
-# --- GROQ COM TEMPERATURE ALTA = MAIS CRIATIVO ---
-def call_groq_api(payload, model="llama-3.3-70b-versatile", temperature=0.9):
-    for key in GROQ_KEYS:
-        if not key: continue
-        try:
-            r = requests.post("https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {key}"},
-                json={**payload, "model": model, "temperature": temperature}, timeout=15)
-            if r.status_code == 200:
-                return r.json()["choices"][0]["message"]["content"]
-        except: pass
-    if model == "llama-3.3-70b-versatile":
-        return call_groq_api(payload, model="llama-3.1-8b-instant", temperature=temperature)
-    return None
-
-def groq_chat(user_id, user_msg, chat_id=None):
-    if contem_conteudo_bloqueado(user_msg):
-        return "Opa, prefiro não falar sobre isso 😅 Bora mudar de assunto?"
-
-    memoria_resumo = gerar_resumo_usuario(user_id) # Agora ele realmente lê do arquivo
-    history = conversations.get(user_id, [])
-    history.append({"role": "user", "content": user_msg})
-    auto_manage_history(user_id)
-
-    time_info = f"A data e hora atual do usuário é {get_user_time(user_id)}." if should_add_time_info(user_msg) else ""
-    creator_info = f"O criador do bot é {CREATOR_NAME}. ID do criador: {OWNER_ID}."
-    if str(user_id) == str(OWNER_ID): creator_info += " Conversando diretamente com o criador."
-
-    payload = {
-        "messages": [
-            {
-                "role": "system",
-                "content": f"Você é {BOT_NAME}, amigo humano criado por {CREATOR_NAME}. {creator_info} {memoria_resumo} Responda no idioma do usuário, curto, natural, com gírias leves, bem-humorado e CRIATIVO. Varie suas respostas, não seja repetitivo. NUNCA fale de conteúdo sexual, pornográfico ou +18. Se pedirem, mude de assunto educadamente. {time_info}"
-            }
-        ] + history
+    return {
+        "prompt": prompt,
+        "user_id": user_id,
+        "chat_id": chat_id,
+        "chat_type": chat_type,
+        "chat_title": chat_title,
     }
-    reply = call_groq_api(payload, temperature=0.9) or "Ops, buguei 🤯 tenta de novo aí!"
 
-    if contem_conteudo_bloqueado(reply):
-        reply = "Prefiro não entrar nesse assunto 😅 Quer conversar sobre outra coisa?"
 
-    salvar_no_canal(user_id, user_msg, reply, chat_id=chat_id)
-    history.append({"role": "assistant", "content": reply})
-    conversations[user_id] = history[-HISTORY_LIMIT:]
-    return reply
+# ==========================================================
+# ENVIO DE MENSAGEM
+# ==========================================================
 
-# --- LIDAR COM REAÇÕES/LIKES ---
-def marcar_como_importante(chat_id, message_id):
-    for item in reversed(memory_cache):
-        if str(item.get('chat_id')) == str(chat_id):
-            item['importante'] = True
-            salvar_memoria()
-            salvar_no_canal(item['user_id'], item['user'], item['bot'], importante=True, chat_id=chat_id)
-            print(f"Mensagem marcada como IMPORTANTE: {item['user'][:20]}")
-            break
+def send_message(
+    chat_id,
+    text,
+    reply_to=None
+):
+    try:
 
-# --- APIs ---
-def get_joke_api():
-    try: return requests.get("https://api.chucknorris.io/jokes/random", timeout=5).json().get('value', '😅 Sem piada')
-    except: return "😅 Sem piada"
-def get_fact_api():
-    try: return requests.get("https://uselessfacts.jsph.pl/random.json?language=en", timeout=5).json().get('text', '🤔 Sem fato')
-    except: return "🤔 Sem fato"
+        if not text:
+            return False
 
-def send_telegram_message(chat_id, text, reply_to_message_id=None):
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
-    if reply_to_message_id: payload["reply_to_message_id"] = reply_to_message_id
-    r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload, timeout=5)
-    return r.json().get("result", {}).get("message_id")
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+        }
 
-def auto_post(): pass
-scheduler = BackgroundScheduler()
-scheduler.add_job(auto_post, "interval", hours=6)
-scheduler.start()
+        if reply_to:
+            payload[
+                "reply_to_message_id"
+            ] = reply_to
 
-def clean_mention(text):
-    text = re.sub(r'@\w+', '', text)
-    text = re.sub(rf'{BOT_NAME}', '', text, flags=re.IGNORECASE)
-    text = re.sub(rf'{BOT_FIRST_NAME}', '', text, flags=re.IGNORECASE)
-    return text.strip()
+        response = session.post(
+            f"{TELEGRAM_API_URL}/sendMessage",
+            json=payload,
+            timeout=TIMEOUT_API
+        )
 
-# --- WEBHOOK ---
-@app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
+        if response.status_code != 200:
+
+            logging.warning(
+                f"[TELEGRAM] HTTP "
+                f"{response.status_code}: "
+                f"{response.text[:300]}"
+            )
+
+            return False
+
+        return True
+
+    except Exception as e:
+
+        logging.exception(
+            f"[SEND MESSAGE ERROR] {e}"
+        )
+
+        return False
+
+
+# ==========================================================
+# SUPABASE STATUS
+# ==========================================================
+
+def get_supabase_usage():
+    try:
+
+        from config import SUPABASE_SERVICE_KEY
+
+        if not SUPABASE_SERVICE_KEY:
+
+            return (
+                "❌ SUPABASE_SERVICE_KEY "
+                "não configurada."
+            )
+
+        headers = {
+            "apikey": SUPABASE_SERVICE_KEY,
+            "Authorization":
+                f"Bearer {SUPABASE_SERVICE_KEY}",
+        }
+
+        response = session.post(
+            f"{os.getenv('SUPABASE_URL')}"
+            "/rest/v1/rpc/pg_database_size",
+            headers=headers,
+            json={"dbname": "postgres"},
+            timeout=TIMEOUT_API
+        )
+
+        if response.status_code != 200:
+            return "❌ Não foi possível consultar o banco."
+
+        db_bytes = response.json()
+
+        db_mb = (
+            db_bytes / 1024 / 1024
+        )
+
+        return (
+            f"📊 Banco: {db_mb:.2f} MB"
+        )
+
+    except Exception as e:
+
+        logging.exception(
+            f"[SUPABASE STATUS ERROR] {e}"
+        )
+
+        return "❌ Erro ao consultar o banco."
+
+
+# ==========================================================
+# PROCESSAMENTO PRINCIPAL
+# ==========================================================
+
+def process_message(msg):
+
+    try:
+
+        chat = msg["chat"]
+
+        chat_id = chat["id"]
+
+        chat_type = chat["type"]
+
+        chat_title = chat.get(
+            "title",
+            ""
+        )
+
+        user = msg["from"]
+
+        user_id = str(
+            user["id"]
+        )
+
+        message_id = msg[
+            "message_id"
+        ]
+
+        user_text = msg.get(
+            "text",
+            ""
+        )
+
+
+        # ==================================================
+        # STICKER
+        # ==================================================
+
+        if "sticker" in msg:
+
+            file_id = msg[
+                "sticker"
+            ]["file_id"]
+
+            descricao = (
+                analisar_midia_com_gemini(
+                    file_id,
+                    "sticker"
+                )
+            )
+
+            if descricao:
+
+                user_text = (
+                    "[Usuário enviou um "
+                    f"sticker. Conteúdo: "
+                    f"{descricao}]"
+                )
+
+            else:
+
+                user_text = (
+                    "[Usuário enviou um sticker]"
+                )
+
+
+        # ==================================================
+        # GIF / ANIMATION
+        # ==================================================
+
+        elif "animation" in msg:
+
+            file_id = msg[
+                "animation"
+            ]["file_id"]
+
+            descricao = (
+                analisar_midia_com_gemini(
+                    file_id,
+                    "gif"
+                )
+            )
+
+            if descricao:
+
+                user_text = (
+                    "[Usuário enviou um GIF. "
+                    f"Conteúdo: {descricao}]"
+                )
+
+            else:
+
+                user_text = (
+                    "[Usuário enviou um GIF]"
+                )
+
+
+        # ==================================================
+        # GIF ENVIADO COMO DOCUMENTO
+        # ==================================================
+
+        elif (
+            "document" in msg
+            and msg["document"].get(
+                "mime_type"
+            ) == "image/gif"
+        ):
+
+            file_id = msg[
+                "document"
+            ]["file_id"]
+
+            descricao = (
+                analisar_midia_com_gemini(
+                    file_id,
+                    "gif"
+                )
+            )
+
+            if descricao:
+
+                user_text = (
+                    "[Usuário enviou um GIF. "
+                    f"Conteúdo: {descricao}]"
+                )
+
+            else:
+
+                user_text = (
+                    "[Usuário enviou um GIF]"
+                )
+
+
+        # ==================================================
+        # MENSAGEM VAZIA
+        # ==================================================
+
+        if not user_text.strip():
+            return
+
+
+        texto_lower = (
+            user_text.lower().strip()
+        )
+
+
+        # ==================================================
+        # COMANDOS
+        # ==================================================
+
+        if re.match(
+            r"^/\w+",
+            texto_lower
+        ):
+
+            executado = handle_command(
+                chat_id,
+                user_id,
+                texto_lower,
+                message_id,
+                send_message,
+                get_supabase_usage,
+            )
+
+            if executado:
+                return
+
+
+        # ==================================================
+        # SAUDAÇÃO
+        # ==================================================
+
+        saudacoes = [
+            "oi",
+            "ola",
+            "olá",
+            "bom dia",
+            "boa tarde",
+            "boa noite",
+            "eai",
+            "fala"
+        ]
+
+        if (
+            any(
+                texto_lower.startswith(s)
+                for s in saudacoes
+            )
+            and len(texto_lower.split()) < 4
+        ):
+
+            responder_saudacao(
+                chat_id,
+                message_id,
+                send_message
+            )
+
+            return
+
+
+        # ==================================================
+        # SALVAR MENSAGEM
+        # ==================================================
+
+        save_message(
+            user_id,
+            chat_id,
+            chat_type,
+            chat_title,
+            "user",
+            user_text
+        )
+
+
+        # ==================================================
+        # MEMÓRIA
+        # ==================================================
+
+        save_memory(
+            user_id,
+            chat_id,
+            "user",
+            user_text
+        )
+
+
+        # ==================================================
+        # EXTRAÇÃO AUTOMÁTICA
+        # ==================================================
+
+        extrair_dados_automaticos(
+            user_id,
+            user_text
+        )
+
+
+        # ==================================================
+        # CATEGORIA
+        # ==================================================
+
+        categoria = "conversa"
+
+        mapa = {
+            "nome": "nome",
+            "apelido": "apelido",
+            "me chama": "apelido",
+            "moro": "cidade",
+            "cidade": "cidade",
+            "trabalho": "profissao",
+            "profissao": "profissao",
+            "profissão": "profissao",
+            "gosto": "gosto",
+            "favorito": "comida",
+            "comida": "comida",
+        }
+
+        for palavra, cat in mapa.items():
+
+            if palavra in texto_lower:
+
+                categoria = cat
+                break
+
+
+        # ==================================================
+        # CONTEXTO
+        # ==================================================
+
+        contexto = montar_contexto(
+            user_id,
+            chat_id,
+            chat_type,
+            chat_title
+        )
+
+
+        # ==================================================
+        # IA
+        # ==================================================
+
+        resposta = call_ai_smart(
+            user_text,
+            contexto,
+            categoria
+        )
+
+
+        # ==================================================
+        # RESPOSTA
+        # ==================================================
+
+        enviar_resposta(
+            chat_id,
+            resposta,
+            message_id,
+            send_message
+        )
+
+
+    except Exception as e:
+
+        logging.exception(
+            f"[PROCESS ERROR] {e}"
+        )
+
+
+# ==========================================================
+# WEBHOOK
+# ==========================================================
+
+@app.route(
+    f"/{TELEGRAM_TOKEN}",
+    methods=["POST"]
+)
 def webhook():
-    data = request.json
 
-    # 1. LIDAR COM REAÇÕES
-    if "message_reaction" in data:
-        reaction = data["message_reaction"]
-        if any(r['emoji'] == '❤️' for r in reaction.get('new_reaction', [])):
-            marcar_como_importante(reaction['chat']['id'], reaction['message_id'])
-        return jsonify({"ok": True})
+    data = request.get_json(
+        silent=True
+    )
 
-    message = data.get("message", {})
-    chat_id = message.get("chat", {}).get("id")
-    chat_type = message.get("chat", {}).get("type")
+    if not data:
+        return "ok"
 
-    if chat_type in ["group", "supergroup"]: group_ids.add(chat_id)
-    if message.get("from", {}).get("is_bot"): return jsonify({"ok": True})
 
-    if "text" in message:
-        user_msg = message["text"].strip()
-        should_reply = False
-        clean_msg = user_msg
+    # ======================================================
+    # DELEGAR PARA WEBHOOK.PY
+    # ======================================================
 
-        if chat_type == "private": should_reply = True
-        elif chat_type in ["group", "supergroup"]:
-            u_clean = BOT_USERNAME.lower().replace("@", "")
-            msg_lower = user_msg.lower()
-            reply_to = message.get("reply_to_message", {})
-            respondendo_bot = False
-            if reply_to:
-                reply_from = reply_to.get("from", {})
-                respondendo_bot = str(reply_from.get("id")) == str(BOT_ID)
-            foi_mencionado = f"@{u_clean}" in msg_lower or BOT_NAME.lower() in msg_lower or BOT_FIRST_NAME.lower() in msg_lower or respondendo_bot
-            if foi_mencionado:
-                should_reply = True
-                clean_msg = clean_mention(user_msg) or "Oi"
+    return processar_webhook(
+        data,
+        process_message
+    )
 
-        if should_reply:
-            user_id = message["from"]["id"]
-            reply = groq_chat(user_id, clean_msg, chat_id)
-            msg_id = send_telegram_message(chat_id, reply, message.get("message_id"))
-            # Atualiza o último item com message_id
-            if memory_cache:
-                memory_cache[-1]['message_id'] = msg_id
-                salvar_memoria()
 
-    return jsonify({"ok": True})
+# ==========================================================
+# HEALTH CHECK
+# ==========================================================
 
-@app.route("/")
-def index():
-    return f"{BOT_NAME} rodando! Memória: {len(memory_cache)} itens | Criador: {CREATOR_NAME}"
+@app.route("/health")
+def health():
+
+    return "ok", 200
+
+
+# ==========================================================
+# EXECUÇÃO LOCAL
+# ==========================================================
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+
+    port = int(
+        os.getenv(
+            "PORT",
+            "8080"
+        )
+    )
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+            )
