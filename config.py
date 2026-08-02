@@ -5,12 +5,12 @@ import os
 # CONFIGURAÇÕES PRINCIPAIS DO HANSEL
 # ==========================================================
 
-BOT_NAME = "Hansel"
+BOT_NAME = "Matheus"
 CREATOR = "Kleber"
-BOT_TAG = "hansel"
+BOT_TAG = @NIOBIOchat_BOT
 
-BOT_ID = None
-BOT_USERNAME = None
+BOT_ID = "matheus"
+BOT_USERNAME = NIOBIOchat_BOT
 
 # IDs dos administradores
 ADMINS = ["8398287578"]
