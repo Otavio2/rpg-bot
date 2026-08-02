@@ -18,7 +18,6 @@ def save_message(user_id, chat_id, chat_type, chat_title, role, content, bot_id=
     }).execute()
 
 def save_memory(user_id, chat_id, role, content, bot_id="hansel"):
-    # Por enquanto salva no mesmo chat_history
     supabase.table("chat_history").insert({
         "user_id": user_id,
         "bot_id": bot_id,
@@ -33,3 +32,11 @@ def save_user_profile(user_id, data, bot_id="hansel"):
         "bot_id": bot_id,
         **data
     }).execute()
+
+def buscar_dados_usuario(user_id, bot_id="hansel"):
+    """Busca os dados salvos do usuário"""
+    try:
+        res = supabase.table("user_profiles").select("*").eq("user_id", str(user_id)).eq("bot_id", bot_id).single().execute()
+        return res.data if res.data else {}
+    except:
+        return {}
