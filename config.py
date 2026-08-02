@@ -7,10 +7,10 @@ import os
 
 BOT_NAME = "Matheus"
 CREATOR = "Kleber"
-BOT_TAG = NIOBIOchat_BOT
+BOT_TAG = "@NIOBIOchat_BOT"
 
 BOT_ID = "matheus"
-BOT_USERNAME = NIOBIOchat_BOT
+BOT_USERNAME = "NIOBIOchat_BOT"
 
 # IDs dos administradores
 ADMINS = ["8398287578"]
