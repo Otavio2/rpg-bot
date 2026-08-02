@@ -40,3 +40,17 @@ def buscar_dados_usuario(user_id, bot_id="hansel"):
         return res.data if res.data else {}
     except:
         return {}
+
+def limpar_dados_usuario(user_id, bot_id="hansel"):
+    """Limpa os dados do usuário - usado no /limpar"""
+    try:
+        # Limpa profile
+        supabase.table("user_profiles").delete().eq("user_id", str(user_id)).eq("bot_id", bot_id).execute()
+        # Limpa memory
+        supabase.table("memory").delete().eq("user_id", str(user_id)).eq("bot_id", bot_id).execute()
+        # Limpa chat_history
+        supabase.table("chat_history").delete().eq("user_id", str(user_id)).eq("bot_id", bot_id).execute()
+        return True
+    except Exception as e:
+        print(f"Erro ao limpar: {e}")
+        return False
