@@ -34,7 +34,6 @@ def save_user_profile(user_id, data, bot_id="hansel"):
     }).execute()
 
 def buscar_dados_usuario(user_id, bot_id="hansel"):
-    """Busca os dados salvos do usuário"""
     try:
         res = supabase.table("user_profiles").select("*").eq("user_id", str(user_id)).eq("bot_id", bot_id).single().execute()
         return res.data if res.data else {}
@@ -42,15 +41,21 @@ def buscar_dados_usuario(user_id, bot_id="hansel"):
         return {}
 
 def limpar_dados_usuario(user_id, bot_id="hansel"):
-    """Limpa os dados do usuário - usado no /limpar"""
     try:
-        # Limpa profile
         supabase.table("user_profiles").delete().eq("user_id", str(user_id)).eq("bot_id", bot_id).execute()
-        # Limpa memory
         supabase.table("memory").delete().eq("user_id", str(user_id)).eq("bot_id", bot_id).execute()
-        # Limpa chat_history
         supabase.table("chat_history").delete().eq("user_id", str(user_id)).eq("bot_id", bot_id).execute()
         return True
     except Exception as e:
         print(f"Erro ao limpar: {e}")
+        return False
+
+def resetar_banco():
+    try:
+        supabase.table("chat_history").delete().neq("id", 0).execute()
+        supabase.table("memory").delete().neq("id", 0).execute()
+        supabase.table("user_profiles").delete().neq("id", 0).execute()
+        return True
+    except Exception as e:
+        print(f"Erro ao resetar: {e}")
         return False
