@@ -460,20 +460,21 @@ def process_message(msg):
             "fala"
         ]
 
-        if (
+        eh_saudacao = (
             any(
                 texto_lower.startswith(s)
                 for s in saudacoes
             )
             and len(texto_lower.split()) < 4
-        ):
+        )
 
+        # Se foi chamado no grupo OU é saudação, responde
+        if eh_saudacao or bot_foi_chamado:
             responder_saudacao(
                 chat_id,
                 message_id,
                 send_message
             )
-
             return
 
 
