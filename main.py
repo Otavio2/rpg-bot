@@ -63,48 +63,68 @@ COOLDOWN_BOAS_VINDAS = 120 # segundos
 ultima_saudacao_grupo = {}
 ultima_boas_vindas_grupo = {}
 
+BOT_ID_INT = int(BOT_ID) if BOT_ID else None # Normaliza pra int
+
 # ==========================================================
-# FUNÇÕES AUXILIARES
+# FUNÇÕES AUXILIARES CORRIGIDAS
 # ==========================================================
 
 def safe_lower(text):
     return text.lower() if text else ""
 
 def bot_foi_mencionado(msg):
-    """Detecta nome, @username, mention e reply"""
+    """Detecta nome, @username, mention e reply - sem falso positivo"""
     text = msg.get("text", "")
     texto_lower = safe_lower(text)
     
-    # 1. Nome ou @username
-    if BOT_NAME and BOT_NAME.lower() in texto_lower:
-        return True
-    if BOT_USERNAME and BOT_USERNAME.lower() in texto_lower:
-        return True
-    if BOT_USERNAME and f"@{BOT_USERNAME.lower()}" in texto_lower:
-        return True
-    
-    # 2. Reply direto ao bot
+    # 1. Reply direto ao bot - NORMALIZADO
     if "reply_to_message" in msg:
         reply = msg["reply_to_message"]
-        if reply.get("from", {}).get("id") == BOT_ID:
+        reply_id = reply.get("from", {}).get("id")
+        if BOT_ID_INT and reply_id == BOT_ID_INT:
+            logging.info(f"[REPLY] Resposta direta ao bot detectada")
             return True
     
-    # 3. Menção via entities
+    # 2. Menção via entities do Telegram - inclui text_mention
     if "entities" in msg:
         for entity in msg["entities"]:
-            if entity["type"] == "mention":
-                mention = text[entity["offset"]:entity["offset"]+entity["length"]]
-                if BOT_USERNAME and safe_lower(mention) == f"@{BOT_USERNAME.lower()}":
-                    return True
+            if entity["type"] in ["mention", "text_mention"]:
+                if entity["type"] == "mention":
+                    mention = text[entity["offset"]:entity["offset"]+entity["length"]]
+                    if BOT_USERNAME and safe_lower(mention) == f"@{BOT_USERNAME.lower()}":
+                        return True
+                elif entity["type"] == "text_mention":
+                    user = entity.get("user", {})
+                    if user.get("id") == BOT_ID_INT:
+                        return True
+    
+    # 3. Nome ou @username como palavra separada - SEM FALSO POSITIVO
+    if BOT_NAME:
+        # \b garante que é palavra inteira. Ex: "Hansel" sim, "Hanselzinho" não
+        pattern = rf"\b{re.escape(BOT_NAME)}\b"
+        if re.search(pattern, text, flags=re.IGNORECASE):
+            return True
+            
+    if BOT_USERNAME:
+        pattern = rf"@{re.escape(BOT_USERNAME)}\b"
+        if re.search(pattern, text, flags=re.IGNORECASE):
+            return True
+    
     return False
 
 def remover_chamada(user_text):
-    """Remove só o nome/@ do texto"""
+    """Remove só o nome/@ do texto - com escape seguro"""
     if not user_text: return ""
-    pattern = BOT_NAME
+    patterns = []
+    if BOT_NAME:
+        patterns.append(rf"\b{re.escape(BOT_NAME)}\b")
     if BOT_USERNAME:
-        pattern += f"|@{BOT_USERNAME}"
-    return re.sub(pattern, "", user_text, flags=re.IGNORECASE).strip()
+        patterns.append(rf"@{re.escape(BOT_USERNAME)}\b")
+    
+    if not patterns: return user_text
+    
+    full_pattern = "|".join(patterns)
+    return re.sub(full_pattern, "", user_text, flags=re.IGNORECASE).strip(",. ").strip()
 
 def pode_responder_saudacao(chat_id):
     agora = time.time()
