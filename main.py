@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import time
 
 import requests
 from flask import Flask, request
@@ -43,9 +44,8 @@ from webhook import (
     processar_webhook,
 )
 
-
 # ==========================================================
-# FLASK
+# FLASK + CONFIG
 # ==========================================================
 
 app = Flask(__name__)
@@ -57,145 +57,123 @@ logging.basicConfig(
 
 session = requests.Session()
 
+COOLDOWN_SAUDACAO = 60 # segundos
+COOLDOWN_BOAS_VINDAS = 120 # segundos
+
+ultima_saudacao_grupo = {}
+ultima_boas_vindas_grupo = {}
+
+# ==========================================================
+# FUNÇÕES AUXILIARES
+# ==========================================================
+
+def safe_lower(text):
+    return text.lower() if text else ""
+
+def bot_foi_mencionado(msg):
+    """Detecta nome, @username, mention e reply"""
+    text = msg.get("text", "")
+    texto_lower = safe_lower(text)
+    
+    # 1. Nome ou @username
+    if BOT_NAME and BOT_NAME.lower() in texto_lower:
+        return True
+    if BOT_USERNAME and BOT_USERNAME.lower() in texto_lower:
+        return True
+    if BOT_USERNAME and f"@{BOT_USERNAME.lower()}" in texto_lower:
+        return True
+    
+    # 2. Reply direto ao bot
+    if "reply_to_message" in msg:
+        reply = msg["reply_to_message"]
+        if reply.get("from", {}).get("id") == BOT_ID:
+            return True
+    
+    # 3. Menção via entities
+    if "entities" in msg:
+        for entity in msg["entities"]:
+            if entity["type"] == "mention":
+                mention = text[entity["offset"]:entity["offset"]+entity["length"]]
+                if BOT_USERNAME and safe_lower(mention) == f"@{BOT_USERNAME.lower()}":
+                    return True
+    return False
+
+def remover_chamada(user_text):
+    """Remove só o nome/@ do texto"""
+    if not user_text: return ""
+    pattern = BOT_NAME
+    if BOT_USERNAME:
+        pattern += f"|@{BOT_USERNAME}"
+    return re.sub(pattern, "", user_text, flags=re.IGNORECASE).strip()
+
+def pode_responder_saudacao(chat_id):
+    agora = time.time()
+    ultimo = ultima_saudacao_grupo.get(chat_id, 0)
+    if agora - ultimo > COOLDOWN_SAUDACAO:
+        ultima_saudacao_grupo[chat_id] = agora
+        return True
+    return False
+
+def pode_responder_boas_vindas(chat_id):
+    agora = time.time()
+    ultimo = ultima_boas_vindas_grupo.get(chat_id, 0)
+    if agora - ultimo > COOLDOWN_BOAS_VINDAS:
+        ultima_boas_vindas_grupo[chat_id] = agora
+        return True
+    return False
 
 # ==========================================================
 # CONTEXTO
 # ==========================================================
 
-def montar_contexto(
-    user_id,
-    chat_id,
-    chat_type,
-    chat_title
-):
+def montar_contexto(user_id, chat_id, chat_type, chat_title):
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
-    hora = datetime.now(
-        ZoneInfo("America/Fortaleza")
-    )
-
-    dias = [
-        "segunda-feira",
-        "terça-feira",
-        "quarta-feira",
-        "quinta-feira",
-        "sexta-feira",
-        "sábado",
-        "domingo"
-    ]
-
-    meses = [
-        "janeiro",
-        "fevereiro",
-        "março",
-        "abril",
-        "maio",
-        "junho",
-        "julho",
-        "agosto",
-        "setembro",
-        "outubro",
-        "novembro",
-        "dezembro"
-    ]
-
+    hora = datetime.now(ZoneInfo("America/Fortaleza"))
+    dias = ["segunda-feira","terça-feira","quarta-feira","quinta-feira","sexta-feira","sábado","domingo"]
+    meses = ["janeiro","fevereiro","março","abril","maio","junho","julho","agosto","setembro","outubro","novembro","dezembro"]
     dia_semana = dias[hora.weekday()]
-
-    data_atual = (
-        f"{hora.day} de "
-        f"{meses[hora.month - 1]} de "
-        f"{hora.year}"
-    )
-
+    data_atual = f"{hora.day} de {meses[hora.month - 1]} de {hora.year}"
     hora_atual = hora.strftime("%H:%M")
 
-    if hora.hour >= 18:
-        saudacao = "Boa noite"
-    elif hora.hour < 12:
-        saudacao = "Bom dia"
-    else:
-        saudacao = "Boa tarde"
+    if hora.hour >= 18: saudacao = "Boa noite"
+    elif hora.hour < 12: saudacao = "Bom dia"
+    else: saudacao = "Boa tarde"
 
     prompt = f"""
 Você é {BOT_NAME}, criado por {CREATOR}.
+Você está em um grupo chamado "{chat_title}".
 
-Data atual: {data_atual}
-Dia da semana: {dia_semana}
-Horário atual: {hora_atual}
-
-Considere sempre a data, o dia da semana
-e o horário acima ao responder.
-
-Se receber uma descrição de sticker ou GIF,
-entenda o conteúdo e responda somente com texto.
-
-Seja humano, direto, natural e amigável.
-Use gírias brasileiras leves quando combinarem.
-Responda normalmente sem dizer que é um robô.
-
+Data: {data_atual} - {dia_semana} - {hora_atual}
 Saudação atual: {saudacao}
+
+REGRAS:
+- Seja humano, direto, natural e amigável.
+- Use gírias brasileiras leves quando combinarem.
+- Não responda tudo. Só responda quando for chamado ou for relevante.
+- Seja breve em conversas casuais.
+- Não diga que é um robô.
 """
-
-    return {
-        "prompt": prompt,
-        "user_id": user_id,
-        "chat_id": chat_id,
-        "chat_type": chat_type,
-        "chat_title": chat_title,
-    }
-
+    return {"prompt": prompt, "user_id": user_id, "chat_id": chat_id, "chat_type": chat_type, "chat_title": chat_title}
 
 # ==========================================================
 # ENVIO DE MENSAGEM
 # ==========================================================
 
-def send_message(
-    chat_id,
-    text,
-    reply_to=None
-):
+def send_message(chat_id, text, reply_to=None):
     try:
-
-        if not text:
-            return False
-
-        payload = {
-            "chat_id": chat_id,
-            "text": text,
-        }
-
-        if reply_to:
-            payload[
-                "reply_to_message_id"
-            ] = reply_to
-
-        response = session.post(
-            f"{TELEGRAM_API_URL}/sendMessage",
-            json=payload,
-            timeout=TIMEOUT_API
-        )
-
+        if not text: return False
+        payload = {"chat_id": chat_id, "text": text}
+        if reply_to: payload["reply_to_message_id"] = reply_to
+        response = session.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload, timeout=TIMEOUT_API)
         if response.status_code != 200:
-
-            logging.warning(
-                f"[TELEGRAM] HTTP "
-                f"{response.status_code}: "
-                f"{response.text[:300]}"
-            )
-
+            logging.warning(f"[TELEGRAM] HTTP {response.status_code}: {response.text[:300]}")
             return False
-
         return True
-
     except Exception as e:
-
-        logging.exception(
-            f"[SEND MESSAGE ERROR] {e}"
-        )
-
+        logging.exception(f"[SEND MESSAGE ERROR] {e}")
         return False
-
 
 # ==========================================================
 # SUPABASE STATUS
@@ -203,438 +181,142 @@ def send_message(
 
 def get_supabase_usage():
     try:
-
         from config import SUPABASE_SERVICE_KEY
-
-        if not SUPABASE_SERVICE_KEY:
-
-            return (
-                "❌ SUPABASE_SERVICE_KEY "
-                "não configurada."
-            )
-
-        headers = {
-            "apikey": SUPABASE_SERVICE_KEY,
-            "Authorization":
-                f"Bearer {SUPABASE_SERVICE_KEY}",
-        }
-
-        response = session.post(
-            f"{os.getenv('SUPABASE_URL')}"
-            "/rest/v1/rpc/pg_database_size",
-            headers=headers,
-            json={"dbname": "postgres"},
-            timeout=TIMEOUT_API
-        )
-
-        if response.status_code != 200:
-            return "❌ Não foi possível consultar o banco."
-
+        if not SUPABASE_SERVICE_KEY: return "❌ SUPABASE_SERVICE_KEY não configurada."
+        headers = {"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"}
+        response = session.post(f"{os.getenv('SUPABASE_URL')}/rest/v1/rpc/pg_database_size", headers=headers, json={"dbname": "postgres"}, timeout=TIMEOUT_API)
+        if response.status_code != 200: return "❌ Não foi possível consultar o banco."
         db_bytes = response.json()
-
-        db_mb = (
-            db_bytes / 1024 / 1024
-        )
-
-        return (
-            f"📊 Banco: {db_mb:.2f} MB"
-        )
-
+        db_mb = db_bytes / 1024 / 1024
+        return f"📊 Banco: {db_mb:.2f} MB"
     except Exception as e:
-
-        logging.exception(
-            f"[SUPABASE STATUS ERROR] {e}"
-        )
-
+        logging.exception(f"[SUPABASE STATUS ERROR] {e}")
         return "❌ Erro ao consultar o banco."
-
 
 # ==========================================================
 # PROCESSAMENTO PRINCIPAL
 # ==========================================================
 
 def process_message(msg):
-
     try:
-
         chat = msg["chat"]
-
         chat_id = chat["id"]
-
         chat_type = chat["type"]
-
-        chat_title = chat.get(
-            "title",
-            ""
-        )
-
+        chat_title = chat.get("title", "")
         user = msg["from"]
+        user_id = str(user["id"])
+        message_id = msg["message_id"]
+        user_text = msg.get("text", "")
 
-        user_id = str(
-            user["id"]
-        )
-
-        message_id = msg[
-            "message_id"
-        ]
-
-        user_text = msg.get(
-            "text",
-            ""
-        )
-
+        logging.info(f"[MESSAGE] chat={chat_id} user={user_id} text={user_text[:50]}")
 
         # ==================================================
-        # STICKER
+        # 1. NOVO MEMBRO - BOAS VINDAS
         # ==================================================
-
-        if "sticker" in msg:
-
-            file_id = msg[
-                "sticker"
-            ]["file_id"]
-
-            descricao = (
-                analisar_midia_com_gemini(
-                    file_id,
-                    "sticker"
-                )
-            )
-
-            if descricao:
-
-                user_text = (
-                    "[Usuário enviou um "
-                    f"sticker. Conteúdo: "
-                    f"{descricao}]"
-                )
-
-            else:
-
-                user_text = (
-                    "[Usuário enviou um sticker]"
-                )
-
-
-        # ==================================================
-        # GIF / ANIMATION
-        # ==================================================
-
-        elif "animation" in msg:
-
-            file_id = msg[
-                "animation"
-            ]["file_id"]
-
-            descricao = (
-                analisar_midia_com_gemini(
-                    file_id,
-                    "gif"
-                )
-            )
-
-            if descricao:
-
-                user_text = (
-                    "[Usuário enviou um GIF. "
-                    f"Conteúdo: {descricao}]"
-                )
-
-            else:
-
-                user_text = (
-                    "[Usuário enviou um GIF]"
-                )
-
-
-        # ==================================================
-        # GIF ENVIADO COMO DOCUMENTO
-        # ==================================================
-
-        elif (
-            "document" in msg
-            and msg["document"].get(
-                "mime_type"
-            ) == "image/gif"
-        ):
-
-            file_id = msg[
-                "document"
-            ]["file_id"]
-
-            descricao = (
-                analisar_midia_com_gemini(
-                    file_id,
-                    "gif"
-                )
-            )
-
-            if descricao:
-
-                user_text = (
-                    "[Usuário enviou um GIF. "
-                    f"Conteúdo: {descricao}]"
-                )
-
-            else:
-
-                user_text = (
-                    "[Usuário enviou um GIF]"
-                )
-
-
-        # ==================================================
-        # MENSAGEM VAZIA
-        # ==================================================
-
-        if not user_text.strip():
+        if "new_chat_members" in msg:
+            if chat_type in ["group", "supergroup"] and pode_responder_boas_vindas(chat_id):
+                nomes = [m.get("first_name", "pessoa") for m in msg["new_chat_members"]]
+                nomes_str = ", ".join(nomes)
+                texto_boasvindas = f"👋 Seja bem-vindo(a) {nomes_str}! Eu sou o {BOT_NAME}. Fica à vontade por aqui 😎"
+                send_message(chat_id, texto_boasvindas)
+                logging.info(f"[WELCOME] {nomes_str} entrou no grupo {chat_id}")
             return
 
+        # ==================================================
+        # 2. STICKER / GIF
+        # ==================================================
+        if "sticker" in msg:
+            descricao = analisar_midia_com_gemini(msg["sticker"]["file_id"], "sticker")
+            user_text = f"[Usuário enviou um sticker. Conteúdo: {descricao}]" if descricao else "[Usuário enviou um sticker]"
+        elif "animation" in msg:
+            descricao = analisar_midia_com_gemini(msg["animation"]["file_id"], "gif")
+            user_text = f"[Usuário enviou um GIF. Conteúdo: {descricao}]" if descricao else "[Usuário enviou um GIF]"
+        elif "document" in msg and msg["document"].get("mime_type") == "image/gif":
+            descricao = analisar_midia_com_gemini(msg["document"]["file_id"], "gif")
+            user_text = f"[Usuário enviou um GIF. Conteúdo: {descricao}]" if descricao else "[Usuário enviou um GIF]"
 
-        texto_lower = (
-            user_text.lower().strip()
-        )
-
+        if not user_text.strip(): return
+        texto_lower = safe_lower(user_text)
 
         # ==================================================
-        # CHAMADA PELO NOME NO GRUPO - NOVO
+        # 3. DETECTAR CHAMADA
         # ==================================================
-        
-        bot_foi_chamado = False
-        
-        if chat_type in ["group", "supergroup"]:
-            if (
-                BOT_NAME.lower() in texto_lower 
-                or BOT_USERNAME.lower() in texto_lower
-                or f"@{BOT_USERNAME.lower()}" in texto_lower
-            ):
-                bot_foi_chamado = True
-                # remove o nome da mensagem pra IA não se confundir
-                user_text = re.sub(
-                    rf"{BOT_NAME}|@{BOT_USERNAME}", 
-                    "", 
-                    user_text, 
-                    flags=re.IGNORECASE
-                ).strip()
-                
-                if not user_text:
-                    user_text = "oi"
-                    
-                texto_lower = user_text.lower().strip()
-
-
-        # ==================================================
-        # COMANDOS
-        # ==================================================
-
-        if re.match(
-            r"^/\w+",
-            texto_lower
-        ) or bot_foi_chamado:
-
-            executado = handle_command(
-                chat_id,
-                user_id,
-                texto_lower,
-                message_id,
-                send_message,
-                get_supabase_usage,
-            )
-
-            if executado:
+        foi_chamado = bot_foi_mencionado(msg)
+        if foi_chamado:
+            logging.info(f"[MENTION] Bot foi chamado no chat {chat_id}")
+            user_text = remover_chamada(user_text)
+            texto_lower = safe_lower(user_text)
+            if not texto_lower:
+                responder_saudacao(chat_id, message_id, send_message)
                 return
 
+        # ==================================================
+        # 4. COMANDOS
+        # ==================================================
+        if re.match(r"^/\w+", texto_lower):
+            logging.info(f"[COMMAND] {texto_lower}")
+            executado = handle_command(chat_id, user_id, texto_lower, message_id, send_message, get_supabase_usage)
+            if executado: return
 
         # ==================================================
-        # SAUDAÇÃO
+        # 5. SAUDAÇÃO COM COOLDOWN
         # ==================================================
+        saudacoes = ["oi","ola","olá","bom dia","boa tarde","boa noite","eai","e aí","fala"]
+        eh_saudacao = any(texto_lower.startswith(s) for s in saudacoes) and len(texto_lower.split()) < 4
 
-        saudacoes = [
-            "oi",
-            "ola",
-            "olá",
-            "bom dia",
-            "boa tarde",
-            "boa noite",
-            "eai",
-            "fala"
-        ]
-
-        eh_saudacao = (
-            any(
-                texto_lower.startswith(s)
-                for s in saudacoes
-            )
-            and len(texto_lower.split()) < 4
-        )
-
-        # Se foi chamado no grupo OU é saudação, responde
-        if eh_saudacao or bot_foi_chamado:
-            responder_saudacao(
-                chat_id,
-                message_id,
-                send_message
-            )
-            return
+        if eh_saudacao:
+            if chat_type == "private" or (chat_type in ["group","supergroup"] and pode_responder_saudacao(chat_id)):
+                logging.info(f"[SAUDACAO] Respondendo em {chat_id}")
+                responder_saudacao(chat_id, message_id, send_message)
+                return
+            else:
+                logging.info(f"[SAUDACAO] Ignorado por cooldown em {chat_id}")
+                return
 
         # ==================================================
-        # SALVAR MENSAGEM
+        # 6. SE FOI CHAMADO OU REPLY, MANDA PRA IA
         # ==================================================
-
-        save_message(
-            user_id,
-            chat_id,
-            chat_type,
-            chat_title,
-            "user",
-            user_text
-        )
-
+        if foi_chamado:
+            logging.info(f"[AI] Enviando pra IA: {user_text}")
+        else:
+            # Se não foi chamado e está em grupo, ignora pra não floodar
+            if chat_type in ["group", "supergroup"]:
+                logging.info(f"[IGNORE] Mensagem normal em grupo")
+                return
 
         # ==================================================
-        # MEMÓRIA
+        # 7. SALVAR + IA
         # ==================================================
+        try: save_message(user_id, chat_id, chat_type, chat_title, "user", user_text)
+        except Exception as e: logging.error(f"[SAVE MESSAGE ERROR] {e}")
 
-        save_memory(
-            user_id,
-            chat_id,
-            "user",
-            user_text
-        )
+        try: save_memory(user_id, chat_id, "user", user_text)
+        except Exception as e: logging.error(f"[SAVE MEMORY ERROR] {e}")
 
+        try: extrair_dados_automaticos(user_id, user_text)
+        except Exception as e: logging.error(f"[EXTRAIR ERROR] {e}")
 
-        # ==================================================
-        # EXTRAÇÃO AUTOMÁTICA
-        # ==================================================
-
-        extrair_dados_automaticos(
-            user_id,
-            user_text
-        )
-
-
-        # ==================================================
-        # CATEGORIA
-        # ==================================================
-
-        categoria = "conversa"
-
-        mapa = {
-            "nome": "nome",
-            "apelido": "apelido",
-            "me chama": "apelido",
-            "moro": "cidade",
-            "cidade": "cidade",
-            "trabalho": "profissao",
-            "profissao": "profissao",
-            "profissão": "profissao",
-            "gosto": "gosto",
-            "favorito": "comida",
-            "comida": "comida",
-        }
-
-        for palavra, cat in mapa.items():
-
-            if palavra in texto_lower:
-
-                categoria = cat
-                break
-
-
-        # ==================================================
-        # CONTEXTO
-        # ==================================================
-
-        contexto = montar_contexto(
-            user_id,
-            chat_id,
-            chat_type,
-            chat_title
-        )
-
-
-        # ==================================================
-        # IA
-        # ==================================================
-
-        resposta = call_ai_smart(
-            user_text,
-            contexto,
-            categoria
-        )
-
-
-        # ==================================================
-        # RESPOSTA
-        # ==================================================
-
-        enviar_resposta(
-            chat_id,
-            resposta,
-            message_id,
-            send_message
-        )
-
+        contexto = montar_contexto(user_id, chat_id, chat_type, chat_title)
+        resposta = call_ai_smart(user_text, contexto, "conversa")
+        enviar_resposta(chat_id, resposta, message_id, send_message)
 
     except Exception as e:
-
-        logging.exception(
-            f"[PROCESS ERROR] {e}"
-        )
-
+        logging.exception(f"[PROCESS ERROR] {e}")
 
 # ==========================================================
-# WEBHOOK
+# WEBHOOK + HEALTH
 # ==========================================================
 
-@app.route(
-    f"/{TELEGRAM_TOKEN}",
-    methods=["POST"]
-)
+@app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
-
-    data = request.get_json(
-        silent=True
-    )
-
-    if not data:
-        return "ok"
-
-
-    # ======================================================
-    # DELEGAR PARA WEBHOOK.PY
-    # ======================================================
-
-    return processar_webhook(
-        data,
-        process_message
-    )
-
-
-# ==========================================================
-# HEALTH CHECK
-# ==========================================================
+    data = request.get_json(silent=True)
+    if not data: return "ok"
+    return processar_webhook(data, process_message)
 
 @app.route("/health")
 def health():
-
     return "ok", 200
 
-
-# ==========================================================
-# EXECUÇÃO LOCAL
-# ==========================================================
-
 if __name__ == "__main__":
-
-    port = int(
-        os.getenv(
-            "PORT",
-            "8080"
-        )
-    )
-
-    app.run(
-        host="0.0.0.0",
-        port=port
-                )
+    port = int(os.getenv("PORT", "8080"))
+    app.run(host="0.0.0.0", port=port)
