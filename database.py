@@ -33,8 +33,8 @@ def save_memory(user_id, categoria, valor, bot_id=BOT_ID):
         logging.warning(f"[SAVE MEMORY] Categoria inválida: {categoria}")
         return
     try:
-        # Upsert: se já existir categoria pra esse user, atualiza
-        supabase.table("memory").upsert({
+        # CORRIGIDO: memory -> memories
+        supabase.table("memories").upsert({
             "user_id": str(user_id), "bot_id": bot_id, "categoria": categoria,
             "valor": valor, "updated_at": datetime.utcnow().isoformat()
         }, on_conflict="user_id,bot_id,categoria").execute()
@@ -60,7 +60,8 @@ def buscar_dados_usuario(user_id, bot_id=BOT_ID):
         res_profile = supabase.table("user_profiles").select("*").eq("user_id", str(user_id)).eq("bot_id", bot_id).execute()
         profile = res_profile.data[0] if res_profile.data else {}
 
-        res_memory = supabase.table("memory").select("categoria,valor").eq("user_id", str(user_id)).eq("bot_id", bot_id).execute()
+        # CORRIGIDO: memory -> memories
+        res_memory = supabase.table("memories").select("categoria,valor").eq("user_id", str(user_id)).eq("bot_id", bot_id).execute()
         memories = {m["categoria"]: m["valor"] for m in res_memory.data} if res_memory.data else {}
 
         profile["memories"] = memories
@@ -73,7 +74,8 @@ def limpar_dados_usuario(user_id, bot_id=BOT_ID):
     """Apaga perfil, memória e histórico de um usuário"""
     try:
         supabase.table("user_profiles").delete().eq("user_id", str(user_id)).eq("bot_id", bot_id).execute()
-        supabase.table("memory").delete().eq("user_id", str(user_id)).eq("bot_id", bot_id).execute()
+        # CORRIGIDO: memory -> memories
+        supabase.table("memories").delete().eq("user_id", str(user_id)).eq("bot_id", bot_id).execute()
         supabase.table("chat_history").delete().eq("user_id", str(user_id)).eq("bot_id", bot_id).execute()
         logging.info(f"[CLEAR USER] user={user_id}")
         return True
@@ -85,7 +87,8 @@ def resetar_banco():
     """CUIDADO: Apaga TUDO. Só pra admin"""
     try:
         supabase.table("chat_history").delete().neq("id", 0).execute()
-        supabase.table("memory").delete().neq("id", 0).execute()
+        # CORRIGIDO: memory -> memories
+        supabase.table("memories").delete().neq("id", 0).execute()
         supabase.table("user_profiles").delete().neq("id", 0).execute()
         logging.warning("[RESET BANCO] Banco resetado")
         return True
