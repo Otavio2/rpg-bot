@@ -397,13 +397,40 @@ def process_message(msg):
 
 
         # ==================================================
+        # CHAMADA PELO NOME NO GRUPO - NOVO
+        # ==================================================
+        
+        bot_foi_chamado = False
+        
+        if chat_type in ["group", "supergroup"]:
+            if (
+                BOT_NAME.lower() in texto_lower 
+                or BOT_USERNAME.lower() in texto_lower
+                or f"@{BOT_USERNAME.lower()}" in texto_lower
+            ):
+                bot_foi_chamado = True
+                # remove o nome da mensagem pra IA não se confundir
+                user_text = re.sub(
+                    rf"{BOT_NAME}|@{BOT_USERNAME}", 
+                    "", 
+                    user_text, 
+                    flags=re.IGNORECASE
+                ).strip()
+                
+                if not user_text:
+                    user_text = "oi"
+                    
+                texto_lower = user_text.lower().strip()
+
+
+        # ==================================================
         # COMANDOS
         # ==================================================
 
         if re.match(
             r"^/\w+",
             texto_lower
-        ):
+        ) or bot_foi_chamado:
 
             executado = handle_command(
                 chat_id,
@@ -610,4 +637,4 @@ if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
         port=port
-            )
+                )
