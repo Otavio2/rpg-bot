@@ -5,7 +5,6 @@ from concurrent.futures import ThreadPoolExecutor
 
 from config import BOT_ID, BOT_NAME, BOT_USERNAME
 
-
 # ==========================================================
 # CONTROLE DE UPDATES
 # ==========================================================
@@ -14,112 +13,8 @@ PROCESSED_UPDATES = deque(maxlen=1000)
 
 executor = ThreadPoolExecutor(max_workers=10)
 
-
 # ==========================================================
-# VERIFICAR SE O BOT FOI MENCIONADO
-# ==========================================================
-
-def verificar_mencao(msg):
-    user_text = msg.get("text", "").lower()
-
-    # ------------------------------------------------------
-    # Entidades do Telegram
-    # ------------------------------------------------------
-
-    if "entities" in msg:
-
-        for entity in msg["entities"]:
-
-            if entity.get("type") in [
-                "mention",
-                "text_mention"
-            ]:
-                return True
-
-
-    # ------------------------------------------------------
-    # @username ou nome do bot
-    # ------------------------------------------------------
-
-    if BOT_USERNAME:
-
-        if f"@{BOT_USERNAME.lower()}" in user_text:
-            return True
-
-
-    if BOT_NAME:
-
-        if re.search(
-            rf"\b{re.escape(BOT_NAME.lower())}\b",
-            user_text
-        ):
-            return True
-
-
-    return False
-
-
-# ==========================================================
-# VERIFICAR SE É RESPOSTA AO BOT
-# ==========================================================
-
-def responder_ao_bot(msg):
-
-    reply = msg.get("reply_to_message")
-
-    if not reply:
-        return False
-
-    remetente = reply.get("from", {})
-
-    bot_id = remetente.get("id")
-
-    if BOT_ID is not None:
-
-        return bot_id == BOT_ID
-
-    return False
-
-
-# ==========================================================
-# DECIDIR SE O BOT DEVE RESPONDER
-# ==========================================================
-
-def deve_responder(msg):
-
-    chat = msg.get("chat", {})
-
-    chat_type = chat.get("type")
-
-    # ------------------------------------------------------
-    # Conversa privada
-    # ------------------------------------------------------
-
-    if chat_type == "private":
-        return True
-
-
-    # ------------------------------------------------------
-    # Grupo / supergrupo
-    # ------------------------------------------------------
-
-    if verificar_mencao(msg):
-        return True
-
-
-    # ------------------------------------------------------
-    # Usuário respondeu uma mensagem do bot
-    # ------------------------------------------------------
-
-    if responder_ao_bot(msg):
-        return True
-
-
-    return False
-
-
-# ==========================================================
-# WEBHOOK
+# WEBHOOK - SÓ ENTREGA, NÃO DECIDE
 # ==========================================================
 
 def processar_webhook(
@@ -132,22 +27,21 @@ def processar_webhook(
         if not data:
             return "ok"
 
-
         # --------------------------------------------------
-        # EVITAR DUPLICAÇÃO
+        # 1. EVITAR DUPLICAÇÃO
         # --------------------------------------------------
 
         update_id = data.get("update_id")
 
         if update_id in PROCESSED_UPDATES:
+            logging.info(f"[WEBHOOK] Update duplicado: {update_id}")
             return "ok"
 
         if update_id is not None:
             PROCESSED_UPDATES.append(update_id)
 
-
         # --------------------------------------------------
-        # PEGAR MENSAGEM
+        # 2. PEGAR MENSAGEM OU EVENTO
         # --------------------------------------------------
 
         msg = (
@@ -155,30 +49,30 @@ def processar_webhook(
             or data.get("edited_message")
         )
 
+        # Se não for mensagem de texto, verifica se é new_chat_members
         if not msg:
+            # Pode ser callback, etc. Por enquanto ignora
             return "ok"
 
+        # Log pra debug
+        chat = msg.get("chat", {})
+        chat_type = chat.get("type", "unknown")
+        user = msg.get("from", {}).get("first_name", "Anon")
+
+        logging.info(f"[WEBHOOK] Recebido de {user} em {chat_type}: {msg.get('text', '[midia]')[:50]}")
 
         # --------------------------------------------------
-        # DECIDIR SE RESPONDE
+        # 3. ENTREGAR TUDO PRO MAIN.PY DECIDIR
         # --------------------------------------------------
-
-        if not deve_responder(msg):
-            return "ok"
-
-
-        # --------------------------------------------------
-        # PROCESSAR EM SEGUNDO PLANO
-        # --------------------------------------------------
+        # O main.py agora decide se é menção, saudação, grupo, etc.
+        # Assim não perdemos: new_chat_members, saudações, etc.
 
         executor.submit(
             process_message_func,
             msg
         )
 
-
         return "ok"
-
 
     except Exception as e:
 
