@@ -24,7 +24,7 @@ from ai import (
 
 from database import (
     save_message,
-    save_memory,
+    buscar_dados_usuario, # <- ADICIONADO
 )
 
 from media import (
@@ -100,7 +100,6 @@ def bot_foi_mencionado(msg):
     
     # 3. Nome ou @username como palavra separada - SEM FALSO POSITIVO
     if BOT_NAME:
-        # \b garante que é palavra inteira. Ex: "Hansel" sim, "Hanselzinho" não
         pattern = rf"\b{re.escape(BOT_NAME)}\b"
         if re.search(pattern, text, flags=re.IGNORECASE):
             return True
@@ -299,24 +298,32 @@ def process_message(msg):
         if foi_chamado:
             logging.info(f"[AI] Enviando pra IA: {user_text}")
         else:
-            # Se não foi chamado e está em grupo, ignora pra não floodar
             if chat_type in ["group", "supergroup"]:
                 logging.info(f"[IGNORE] Mensagem normal em grupo")
                 return
 
         # ==================================================
-        # 7. SALVAR + IA
+        # 7. SALVAR + EXTRAIR MEMÓRIA + IA - CORRIGIDO
         # ==================================================
-        try: save_message(user_id, chat_id, chat_type, chat_title, "user", user_text)
-        except Exception as e: logging.error(f"[SAVE MESSAGE ERROR] {e}")
+        try: 
+            save_message(user_id, chat_id, chat_type, chat_title, "user", user_text)
+        except Exception as e: 
+            logging.error(f"[SAVE MESSAGE ERROR] {e}")
 
-        try: save_memory(user_id, chat_id, "user", user_text)
-        except Exception as e: logging.error(f"[SAVE MEMORY ERROR] {e}")
-
-        try: extrair_dados_automaticos(user_id, user_text)
-        except Exception as e: logging.error(f"[EXTRAIR ERROR] {e}")
+        # Só extrai se for info importante. Não salva conversa normal
+        try: 
+            extrair_dados_automaticos(user_id, user_text)
+        except Exception as e: 
+            logging.error(f"[EXTRAIR ERROR] {e}")
 
         contexto = montar_contexto(user_id, chat_id, chat_type, chat_title)
+        
+        # INJETAR MEMÓRIA NO PROMPT ANTES DE CHAMAR A IA
+        dados_usuario = buscar_dados_usuario(user_id)
+        if dados_usuario.get("memories"):
+            memoria_str = "\n".join([f"- {k}: {v}" for k, v in dados_usuario["memories"].items()])
+            contexto["prompt"] += f"\n\nIMPORTANTE: Use essas informações sobre o usuário para responder. Não pergunte de novo:\n{memoria_str}"
+
         resposta = call_ai_smart(user_text, contexto, "conversa")
         enviar_resposta(chat_id, resposta, message_id, send_message)
 
