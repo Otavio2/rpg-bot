@@ -68,3 +68,27 @@ def buscar_dados_usuario(user_id, bot_id=BOT_ID):
     except Exception as e:
         logging.error(f"[GET USER ERROR] {e}")
         return {}
+
+def limpar_dados_usuario(user_id, bot_id=BOT_ID):
+    """Apaga perfil, memória e histórico de um usuário"""
+    try:
+        supabase.table("user_profiles").delete().eq("user_id", str(user_id)).eq("bot_id", bot_id).execute()
+        supabase.table("memory").delete().eq("user_id", str(user_id)).eq("bot_id", bot_id).execute()
+        supabase.table("chat_history").delete().eq("user_id", str(user_id)).eq("bot_id", bot_id).execute()
+        logging.info(f"[CLEAR USER] user={user_id}")
+        return True
+    except Exception as e:
+        logging.error(f"[CLEAR ERROR] {e}")
+        return False
+
+def resetar_banco():
+    """CUIDADO: Apaga TUDO. Só pra admin"""
+    try:
+        supabase.table("chat_history").delete().neq("id", 0).execute()
+        supabase.table("memory").delete().neq("id", 0).execute()
+        supabase.table("user_profiles").delete().neq("id", 0).execute()
+        logging.warning("[RESET BANCO] Banco resetado")
+        return True
+    except Exception as e:
+        logging.error(f"[RESET ERROR] {e}")
+        return False
