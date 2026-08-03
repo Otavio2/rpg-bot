@@ -3,12 +3,17 @@ import logging
 from supabase import create_client
 from datetime import datetime
 
-from config import BOT_ID_DATABASE
+# CORREÇÃO: se não existir no config, usa "matheus"
+try:
+    from config import BOT_ID_DATABASE
+    BOT_ID = BOT_ID_DATABASE
+except ImportError:
+    BOT_ID = os.getenv("BOT_ID_DATABASE", "matheus")
+    logging.warning("[CONFIG] BOT_ID_DATABASE não encontrado. Usando 'matheus'")
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s")
 
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
-BOT_ID = BOT_ID_DATABASE or "matheus"
 
 CAMPOS_VALIDOS = ["nome", "apelido", "cidade", "profissao", "comida", "gostos"]
 
