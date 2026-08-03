@@ -9,7 +9,7 @@ BOT_NAME = "Matheus"
 CREATOR = "Kleber"
 BOT_TAG = "matheus"
 
-BOT_ID = "matheus"
+BOT_ID = "8722172648"
 BOT_USERNAME = "NIOBIOchat_BOT"
 
 # IDs dos administradores
