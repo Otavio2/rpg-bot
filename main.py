@@ -31,7 +31,7 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 BOT_ID = None
 BOT_USERNAME = None
-MODELO_VISION = "openrouter/free" # Modelo gratuito com suporte a imagem
+MODELO_VISION = "meta-llama/llama-4-scout:free" # Modelo gratuito com suporte a imagem
 
 # ========================================
 # LIMITES
