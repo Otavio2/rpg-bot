@@ -11,28 +11,41 @@ from concurrent.futures import ThreadPoolExecutor
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 
+# ========================================
+# CONFIGURAÇÃO
+# ========================================
 BOT_NAME = "NIOBIOchat_BOT"
 CREATOR = "Kleber"
-CREATOR_ID = "8398287578" # SÓ TU TEM ACESSO AO /admin
+CREATOR_ID = "8398287578" # SEU ID
 ADMINS = ["8398287578"]
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 RENDER_URL = "https://edu-bot-6yfa.onrender.com"
 
+if not TELEGRAM_TOKEN: raise RuntimeError("TELEGRAM_TOKEN não configurado")
+if not OPENROUTER_API_KEY: raise RuntimeError("OPENROUTER_API_KEY não configurada")
+
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 BOT_ID = None
 BOT_USERNAME = None
-MODELO_VISION = "openrouter/free" # O free já suporta imagem em alguns modelos
+MODELO_VISION = "openrouter/free" # Modelo gratuito com suporte a imagem
 
+# ========================================
+# LIMITES
+# ========================================
 MAX_TOKENS_RESPOSTA = 500
 HISTORICO_LIMITE_USER = 10
 HISTORICO_LIMITE_GRUPO = 6
-TIMEOUT_API = 60 # imagem demora mais
+MAX_MSG_LENGTH = 4000
+TIMEOUT_API = 60
 COOLDOWN_SEGUNDOS = 3
 
+# ========================================
+# MEMÓRIA TEMPORÁRIA
+# ========================================
 HISTORICO = defaultdict(lambda: deque(maxlen=HISTORICO_LIMITE_USER))
 HISTORICO_GRUPO = defaultdict(lambda: deque(maxlen=HISTORICO_LIMITE_GRUPO))
 USER_COOLDOWN = {}
@@ -40,13 +53,21 @@ LOCK = threading.Lock()
 PROCESSED_UPDATES = set()
 executor = ThreadPoolExecutor(max_workers=5)
 
+# ========================================
+# TELEGRAM
+# ========================================
 def init_bot_info():
     global BOT_ID, BOT_USERNAME
-    r = requests.get(f"{TELEGRAM_API_URL}/getMe", timeout=TIMEOUT_API)
-    data = r.json()["result"]
-    BOT_ID = data["id"]
-    BOT_USERNAME = data["username"].lower()
-    logging.info(f"[BOT] Iniciado como @{BOT_USERNAME} | ID: {BOT_ID}")
+    try:
+        r = requests.get(f"{TELEGRAM_API_URL}/getMe", timeout=TIMEOUT_API)
+        r.raise_for_status()
+        data = r.json()["result"]
+        BOT_ID = data["id"]
+        BOT_USERNAME = data["username"].lower()
+        logging.info(f"[BOT] Iniciado como @{BOT_USERNAME} | ID: {BOT_ID}")
+    except Exception as e:
+        logging.exception(f"[TELEGRAM ERROR] Falha ao iniciar bot: {e}")
+        raise
 
 def send_message(chat_id, text, reply_to=None):
     if not text: text = "Não consegui gerar uma resposta agora."
@@ -82,14 +103,13 @@ def check_cooldown(user_id):
     return True
 
 # ========================================
-# 1. SUPORTE A IMAGEM
+# OPENROUTER COM IMAGEM
 # ========================================
-def call_openrouter_vision(messages, has_image=False):
+def call_openrouter(messages):
     try:
         inicio = time.time()
         headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json", "HTTP-Referer": RENDER_URL, "X-Title": BOT_NAME}
         payload = {"model": MODELO_VISION, "messages": messages, "max_tokens": MAX_TOKENS_RESPOSTA}
-
         r = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=TIMEOUT_API)
         tempo = round(time.time() - inicio, 2)
 
@@ -98,15 +118,18 @@ def call_openrouter_vision(messages, has_image=False):
             return resposta, tempo
 
         logging.error(f"[OPENROUTER] {r.status_code}: {r.text}")
-        if r.status_code == 402: return "⚠️ Limite gratuito atingido.", tempo
-        return f"⚠️ Erro {r.status_code}", tempo
+        if r.status_code == 402: return "⚠️ Limite gratuito da OpenRouter atingido. Volta em algumas horas.", tempo
+        return f"⚠️ Erro {r.status_code} da OpenRouter", tempo
     except Exception as e:
         logging.exception(f"[OPENROUTER ERROR]: {e}")
-        return "⚠️ Erro ao processar imagem.", 0
+        return "⚠️ Erro ao processar.", 0
 
+# ========================================
+# HISTÓRICO
+# ========================================
 def adicionar_historico(chat_id, user_id, role, content, is_group=False):
     with LOCK:
-        msg = {"role": role, "content": content}
+        msg = {"role": role, "content": content[:MAX_MSG_LENGTH]}
         if is_group: HISTORICO_GRUPO[str(chat_id)].append(msg)
         else: HISTORICO[str(user_id)].append(msg)
 
@@ -121,7 +144,7 @@ def limpar_historico(chat_id, user_id, is_group):
 
 def montar_system_prompt(user_info):
     identidade = f"Você está falando com {CREATOR}, o CRIADOR do bot. Seja familiar e zoeiro." if user_info["tipo"] == "criador" else f"Usuário: {user_info['nome']}"
-    return f"Você é {BOT_NAME}. {identidade}\nREGRAS: 1.Responda no idioma do usuário. 2.Seja direto."
+    return f"Você é {BOT_NAME}, assistente para Telegram. {identidade}\nREGRAS: 1.Responda no idioma do usuário. 2.Seja direto, max 4 linhas."
 
 def deve_responder(msg, chat_type):
     if chat_type == "private": return True
@@ -132,9 +155,9 @@ def deve_responder(msg, chat_type):
     return False
 
 # ========================================
-# 3. PAINEL ADMIN
+# COMANDOS
 # ========================================
-def processar_comando(texto, chat_id, user_info, is_group, msg):
+def processar_comando(texto, chat_id, user_info, is_group):
     texto = texto.lower()
     if texto == "/start":
         return f"👋 Opa {user_info['nome']}! Eu sou o *{BOT_NAME}*\nManda texto ou foto que eu respondo. Use `/ajuda`"
@@ -151,8 +174,6 @@ def processar_comando(texto, chat_id, user_info, is_group, msg):
     if texto == "/status":
         total_users = len(HISTORICO)
         return f"✅ Bot online\n✅ Users na memória: {total_users}\n✅ Modelo: {MODELO_VISION}"
-
-    # SÓ CRIADOR PODE USAR
     if texto == "/admin":
         if user_info["tipo"]!= "criador":
             return "❌ Você não tem permissão."
@@ -160,11 +181,12 @@ def processar_comando(texto, chat_id, user_info, is_group, msg):
 Users ativos: {len(HISTORICO)}
 Grupos ativos: {len(HISTORICO_GRUPO)}
 Modelo: {MODELO_VISION}
-Token: {'✅ OK' if TELEGRAM_TOKEN else '❌ FALTA'}
-API Key: {'✅ OK' if OPENROUTER_API_KEY else '❌ FALTA'}"""
-
+API: {'✅ OK' if OPENROUTER_API_KEY else '❌ FALTA'}"""
     return None
 
+# ========================================
+# PROCESSAMENTO
+# ========================================
 def processar_mensagem(msg):
     inicio_total = time.time()
     try:
@@ -177,18 +199,17 @@ def processar_mensagem(msg):
 
         texto = msg.get("text", "").strip()
         has_image = "photo" in msg
-        image_base64 = None
 
-        # 1. SE FOR COMANDO
+        # 1. COMANDO
         if texto and texto.startswith("/"):
-            resposta = processar_comando(texto, chat_id, user_info, is_group, msg)
+            resposta = processar_comando(texto, chat_id, user_info, is_group)
             if resposta:
                 send_message(chat_id, resposta, reply_to=message_id)
                 return
 
-        # 2. SE FOR IMAGEM
+        # 2. IMAGEM
         if has_image:
-            file_id = msg["photo"][-1]["file_id"] # pega maior resolução
+            file_id = msg["photo"][-1]["file_id"]
             image_base64 = get_file_from_telegram(file_id)
             texto = msg.get("caption", "Descreva esta imagem")
 
@@ -203,25 +224,29 @@ def processar_mensagem(msg):
                 ]
             })
             adicionar_historico(chat_id, user_info["id"], "user", f"[IMAGEM] {texto}", is_group)
-            resposta, tempo_ia = call_openrouter_vision(messages, has_image=True)
+            resposta, tempo_ia = call_openrouter(messages)
             adicionar_historico(chat_id, user_info["id"], "assistant", resposta, is_group)
+            logging.info(f"[REQ IMG] {user_info['nome']} | {tempo_ia}s")
             send_message(chat_id, resposta, reply_to=message_id)
             return
 
-        # 3. FLUXO NORMAL DE TEXTO
+        # 3. TEXTO
         if not texto: return
-        intencao = "CONVERSA"
         historico = get_historico(chat_id, user_info["id"], is_group)
         system = montar_system_prompt(user_info)
         messages = [{"role": "system", "content": system}] + historico + [{"role": "user", "content": texto}]
         adicionar_historico(chat_id, user_info["id"], "user", texto, is_group)
-        resposta, tempo_ia = call_openrouter_vision(messages)
+        resposta, tempo_ia = call_openrouter(messages)
         adicionar_historico(chat_id, user_info["id"], "assistant", resposta, is_group)
+        logging.info(f"[REQ] {user_info['nome']}({user_info['tipo']}) | {tempo_ia}s")
         send_message(chat_id, resposta, reply_to=message_id)
 
     except Exception as e:
         logging.exception(f"[PROCESS ERROR] {e}")
 
+# ========================================
+# WEBHOOK
+# ========================================
 @app.route(f'/{TELEGRAM_TOKEN}', methods=['POST'])
 def webhook():
     data = request.get_json()
@@ -233,10 +258,17 @@ def webhook():
     if msg := data.get("message"): executor.submit(processar_mensagem, msg)
     return "ok"
 
-@app.route('/'): def index(): return f"{BOT_NAME} online ✅", 200
-@app.route('/health'): def health(): return "ok", 200
+@app.route('/')
+def index():
+    return f"{BOT_NAME} online ✅", 200
 
+@app.route('/health')
+def health():
+    return "ok", 200
+
+# INICIALIZAÇÃO PRA GUNICORN
 init_bot_info()
+
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
