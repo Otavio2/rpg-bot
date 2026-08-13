@@ -163,9 +163,11 @@ def limpar_historico(chat_id, user_id, is_group):
         else: HISTORICO[str(user_id)].clear()
 
 def montar_system_prompt(user_info):
+    dt = get_datetime_info() # PEGA DATA/HORA ATUAL
     identidade = f"Você está falando com {CREATOR}, o CRIADOR do bot. Seja familiar e zoeiro." if user_info["tipo"] == "criador" else f"Usuário: {user_info['nome']}"
-    return f"Você é {BOT_NAME}, assistente para Telegram. {identidade}\nREGRAS: 1.Responda no idioma do usuário. 2.Seja direto, max 4 linhas."
-
+    return f"""Você é {BOT_NAME}, assistente para Telegram. {identidade}
+DATA ATUAL: {dt['dia_semana']}, {dt['data']} | HORA: {dt['hora']} | LOCAL: Sobral, Ceará
+REGRAS: 1.Responda no idioma do usuário. 2.Seja direto, max 4 linhas. 3.Se perguntarem data/hora/dia, use a DATA ATUAL acima."""
 def deve_responder(msg, chat_type):
     if chat_type == "private": return True
     texto = msg.get("text", "").lower() if msg.get("text") else ""
@@ -187,6 +189,9 @@ def processar_comando(texto, chat_id, user_info, is_group):
 `/ajuda` - Lista de comandos
 `/limpar` - Limpa histórico
 `/status` - Status do bot
+if texto == "/hora":
+        dt = get_datetime_info()
+        return f"📅 Hoje é *{dt['dia_semana']}*, {dt['data']}\n🕐 Agora são *{dt['hora']}* em Sobral/CE"
 `/admin` - Painel do criador"""
     if texto == "/limpar":
         limpar_historico(chat_id, user_info["id"], is_group)
