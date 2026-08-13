@@ -31,7 +31,6 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 BOT_ID = None
 BOT_USERNAME = None
-MODELO_VISION = "meta-llama/llama-4-scout:free" # Modelo gratuito com suporte a imagem
 
 # ========================================
 # LIMITES
@@ -103,26 +102,44 @@ def check_cooldown(user_id):
     return True
 
 # ========================================
-# OPENROUTER COM IMAGEM
+# OPENROUTER COM FALLBACK AUTOMÁTICO
 # ========================================
+MODELOS_FALLBACK = [
+    "qwen/qwen2.5-vl-72b-instruct:free", # 1º - Melhor pra imagem
+    "google/gemini-2.5-flash-lite-preview-06-17:free", # 2º - Mais rápido
+    "deepseek/deepseek-chat-v3-0324:free", # 3º - Bom também
+    "meta-llama/llama-3.2-11b-vision-instruct:free" # 4º - Backup da Meta
+]
+
 def call_openrouter(messages):
-    try:
-        inicio = time.time()
-        headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json", "HTTP-Referer": RENDER_URL, "X-Title": BOT_NAME}
-        payload = {"model": MODELO_VISION, "messages": messages, "max_tokens": MAX_TOKENS_RESPOSTA}
-        r = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=TIMEOUT_API)
-        tempo = round(time.time() - inicio, 2)
+    inicio = time.time()
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": RENDER_URL,
+        "X-Title": BOT_NAME
+    }
 
-        if r.status_code == 200:
-            resposta = r.json().get("choices", [{}])[0].get("message", {}).get("content")
-            return resposta, tempo
+    for i, modelo in enumerate(MODELOS_FALLBACK):
+        try:
+            payload = {"model": modelo, "messages": messages, "max_tokens": MAX_TOKENS_RESPOSTA}
+            r = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=TIMEOUT_API)
+            tempo = round(time.time() - inicio, 2)
 
-        logging.error(f"[OPENROUTER] {r.status_code}: {r.text}")
-        if r.status_code == 402: return "⚠️ Limite gratuito da OpenRouter atingido. Volta em algumas horas.", tempo
-        return f"⚠️ Erro {r.status_code} da OpenRouter", tempo
-    except Exception as e:
-        logging.exception(f"[OPENROUTER ERROR]: {e}")
-        return "⚠️ Erro ao processar.", 0
+            if r.status_code == 200:
+                resposta = r.json().get("choices", [{}])[0].get("message", {}).get("content")
+                if i > 0:
+                    logging.warning(f"[FALLBACK ATIVADO] Usando: {modelo}")
+                return resposta, tempo
+
+            logging.error(f"[OPENROUTER] {modelo} deu {r.status_code}")
+            if r.status_code == 402: return "⚠️ Limite gratuito da OpenRouter atingido hoje.", tempo
+
+        except Exception as e:
+            logging.exception(f"[OPENROUTER ERROR] {modelo}: {e}")
+            continue
+
+    return "⚠️ Todos os modelos free estão fora do ar. Tenta de novo em 1 min.", 0
 
 # ========================================
 # HISTÓRICO
@@ -160,7 +177,7 @@ def deve_responder(msg, chat_type):
 def processar_comando(texto, chat_id, user_info, is_group):
     texto = texto.lower()
     if texto == "/start":
-        return f"👋 Opa {user_info['nome']}! Eu sou o *{BOT_NAME}*\nManda texto ou foto que eu respondo. Use `/ajuda`"
+        return f"👋 Opa {user_info['nome']}! Eu sou o *{BOT_NAME}*\nVamos conversar?. Use `/ajuda`"
     if texto == "/ajuda":
         return f"""*COMANDOS DO {BOT_NAME}*
 `/start` - Boas vindas
@@ -173,14 +190,14 @@ def processar_comando(texto, chat_id, user_info, is_group):
         return "🧹 Histórico limpo!"
     if texto == "/status":
         total_users = len(HISTORICO)
-        return f"✅ Bot online\n✅ Users na memória: {total_users}\n✅ Modelo: {MODELO_VISION}"
+        return f"✅ Bot online\n✅ Users na memória: {total_users}\n✅ Fallback: {len(MODELOS_FALLBACK)} modelos"
     if texto == "/admin":
         if user_info["tipo"]!= "criador":
             return "❌ Você não tem permissão."
         return f"""*PAINEL ADMIN - {CREATOR}*
 Users ativos: {len(HISTORICO)}
 Grupos ativos: {len(HISTORICO_GRUPO)}
-Modelo: {MODELO_VISION}
+Modelos Fallback: {len(MODELOS_FALLBACK)}
 API: {'✅ OK' if OPENROUTER_API_KEY else '❌ FALTA'}"""
     return None
 
