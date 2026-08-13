@@ -189,9 +189,6 @@ def processar_comando(texto, chat_id, user_info, is_group):
 `/ajuda` - Lista de comandos
 `/limpar` - Limpa histórico
 `/status` - Status do bot
-if texto == "/hora":
-        dt = get_datetime_info()
-        return f"📅 Hoje é *{dt['dia_semana']}*, {dt['data']}\n🕐 Agora são *{dt['hora']}* em Sobral/CE"
 `/admin` - Painel do criador"""
     if texto == "/limpar":
         limpar_historico(chat_id, user_info["id"], is_group)
@@ -199,6 +196,9 @@ if texto == "/hora":
     if texto == "/status":
         total_users = len(HISTORICO)
         return f"✅ Bot online\n✅ Users na memória: {total_users}\n✅ Modelo: {MODELO_VISION}"
+    if texto == "/hora":
+        dt = get_datetime_info()
+        return f"📅 Hoje é *{dt['dia_semana']}*, {dt['data']}\n🕐 Agora são *{dt['hora']}
     if texto == "/admin":
         if user_info["tipo"]!= "criador":
             return "❌ Você não tem permissão."
