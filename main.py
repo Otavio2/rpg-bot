@@ -34,64 +34,98 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 BOT_ID = None
 BOT_USERNAME = None
+BOT_INICIADO = False
 
-# SÓ 1 MODELO. O openrouter/free já faz roteamento interno
 MODELO = "openrouter/free"
 
 # ========================================
-# LIMITES E PROTEÇÃO - AGORA CONSERVADOR
+# LIMITES
 # ========================================
-MAX_TOKENS_RESPOSTA = 300 # Reduzi pra gastar menos token
-HISTORICO_LIMITE_USER = 6 # Menos histórico = menos token
+MAX_TOKENS_RESPOSTA = 300
+HISTORICO_LIMITE_USER = 6
 HISTORICO_LIMITE_GRUPO = 4
 MAX_MSG_LENGTH = 2000
 TIMEOUT_API = 45
 COOLDOWN_SEGUNDOS_PV = 3
-COOLDOWN_SEGUNDOS_GRUPO = 10 # 10s em grupo pra durar o dia
-
-MAX_REQUISICOES_POR_MINUTO = 5 # CORREÇÃO 1: 5/min = 7200/dia. Ainda estoura, mas demora mais
+COOLDOWN_SEGUNDOS_GRUPO = 10
+MAX_REQUISICOES_POR_MINUTO = 5
 JANELA_TEMPO = 60
-MAX_REQUISICOES_POR_USER_HORA = 10 # CORREÇÃO 1.5: Anti 1 spammer
+MAX_REQUISICOES_POR_USER_HORA = 10
 
 # ========================================
-# MEMÓRIA TEMPORÁRIA
+# MEMÓRIA
 # ========================================
 HISTORICO = defaultdict(lambda: deque(maxlen=HISTORICO_LIMITE_USER))
 HISTORICO_GRUPO = defaultdict(lambda: deque(maxlen=HISTORICO_LIMITE_GRUPO))
 USER_COOLDOWN = {}
-USER_REQUEST_COUNT = defaultdict(lambda: deque()) # Conta reqs por user na última hora
+USER_REQUEST_COUNT = defaultdict(lambda: deque())
 LOCK = threading.Lock()
 PROCESSED_UPDATES = {}
 UPDATE_EXPIRACAO = 3600
-
-executor = ThreadPoolExecutor(max_workers=3) # CORREÇÃO 3: 3 workers só. Menos 429
+executor = ThreadPoolExecutor(max_workers=3)
 REQUISICOES_TIMES = deque()
 
 # ========================================
 # FUNÇÕES AUXILIARES
 # ========================================
+def init_bot_info():
+    global BOT_ID, BOT_USERNAME, BOT_INICIADO
+    if BOT_INICIADO: return
+    try:
+        r = requests.get(f"{TELEGRAM_API_URL}/getMe", timeout=TIMEOUT_API)
+        r.raise_for_status()
+        data = r.json()["result"]
+        BOT_ID = data["id"]
+        BOT_USERNAME = data["username"].lower()
+        BOT_INICIADO = True
+        logging.info(f"[BOT] Iniciado como @{BOT_USERNAME} | ID: {BOT_ID}")
+    except Exception as e:
+        logging.exception(f"[TELEGRAM ERROR] Falha ao iniciar bot: {e}")
+
+def send_message(chat_id, text, reply_to=None):
+    if not text: text = "Não consegui gerar uma resposta agora."
+    text = text[:4096]
+    for parse_mode in ["Markdown", None]:
+        try:
+            payload = {"chat_id": chat_id, "text": text}
+            if parse_mode: payload["parse_mode"] = parse_mode
+            if reply_to: payload["reply_to_message_id"] = reply_to
+            r = requests.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload, timeout=TIMEOUT_API)
+            if r.status_code == 200: return True
+            if r.status_code == 400 and parse_mode: continue
+        except: time.sleep(1)
+    return False
+
+def get_file_from_telegram(file_id):
+    r = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}")
+    r.raise_for_status()
+    file_path = r.json()["result"]["file_path"]
+    img = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}")
+    img.raise_for_status()
+    return base64.b64encode(img.content).decode("utf-8")
+
+def get_user_info(user):
+    user_id = str(user["id"])
+    nome = user.get("first_name", "usuário")
+    tipo = "criador" if user_id == CREATOR_ID else "admin" if user_id in ADMINS else "usuario"
+    return {"id": user_id, "nome": nome, "tipo": tipo}
+
 def check_user_rate_limit(user_id):
     agora = time.time()
     with LOCK:
         fila = USER_REQUEST_COUNT[user_id]
-        while fila and fila[0] < agora - 3600:
-            fila.popleft()
-        if len(fila) >= MAX_REQUISICOES_POR_USER_HORA:
-            return False
+        while fila and fila[0] < agora - 3600: fila.popleft()
+        if len(fila) >= MAX_REQUISICOES_POR_USER_HORA: return False
         fila.append(agora)
     return True
 
 def check_global_rate_limit():
     agora = time.time()
     with LOCK:
-        while REQUISICOES_TIMES and REQUISICOES_TIMES[0] < agora - JANELA_TEMPO:
-            REQUISICOES_TIMES.popleft()
-        if len(REQUISICOES_TIMES) >= MAX_REQUISICOES_POR_MINUTO:
-            return False
+        while REQUISICOES_TIMES and REQUISICOES_TIMES[0] < agora - JANELA_TEMPO: REQUISICOES_TIMES.popleft()
+        if len(REQUISICOES_TIMES) >= MAX_REQUISICOES_POR_MINUTO: return False
         REQUISICOES_TIMES.append(agora)
     return True
-
-#... resto das funções init_bot_info, send_message, get_file, get_user_info, is_update_processado, get_datetime_info, historico iguais...
 
 def check_cooldown(user_id, is_group):
     cooldown = COOLDOWN_SEGUNDOS_GRUPO if is_group else COOLDOWN_SEGUNDOS_PV
@@ -101,6 +135,36 @@ def check_cooldown(user_id, is_group):
         USER_COOLDOWN[user_id] = agora
     return True
 
+def is_update_processado(update_id):
+    agora = time.time()
+    with LOCK:
+        for uid in list(PROCESSED_UPDATES.keys()):
+            if agora - PROCESSED_UPDATES[uid] > UPDATE_EXPIRACAO: del PROCESSED_UPDATES[uid]
+        if update_id in PROCESSED_UPDATES: return True
+        PROCESSED_UPDATES[update_id] = agora
+    return False
+
+def get_datetime_info():
+    tz = pytz.timezone(TIMEZONE)
+    agora = datetime.now(tz)
+    dias_semana = ["segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"]
+    return {"dia_semana": dias_semana[agora.weekday()], "data": agora.strftime("%d/%m/%Y"), "hora": agora.strftime("%H:%M")}
+
+def adicionar_historico(chat_id, user_id, role, content, is_group=False):
+    with LOCK:
+        msg = {"role": role, "content": content[:MAX_MSG_LENGTH]}
+        if is_group: HISTORICO_GRUPO[str(chat_id)].append(msg)
+        else: HISTORICO[str(user_id)].append(msg)
+
+def get_historico(chat_id, user_id, is_group):
+    with LOCK:
+        return list(HISTORICO_GRUPO[str(chat_id)]) if is_group else list(HISTORICO[str(user_id)])
+
+def limpar_historico(chat_id, user_id, is_group):
+    with LOCK:
+        if is_group: HISTORICO_GRUPO[str(chat_id)].clear()
+        else: HISTORICO[str(user_id)].clear()
+
 def montar_system_prompt(user_info):
     dt = get_datetime_info()
     identidade = f"Você está falando com {CREATOR}, o CRIADOR do bot. Seja familiar e zoeiro." if user_info["tipo"] == "criador" else f"Usuário: {user_info['nome']}"
@@ -108,20 +172,26 @@ def montar_system_prompt(user_info):
 DATA: {dt['dia_semana']}, {dt['data']} {dt['hora']} | Sobral-CE
 REGRAS: 1.Responda no idioma do usuário. 2.Max 3 linhas. 3.Sejá direto."""
 
+def deve_responder(msg, chat_type):
+    if chat_type == "private": return True
+    texto = msg.get("text", "").lower() if msg.get("text") else ""
+    if BOT_USERNAME and f"@{BOT_USERNAME}" in texto: return True
+    if BOT_NAME.lower() in texto: return True
+    if "reply_to_message" in msg and msg["reply_to_message"].get("from", {}).get("id") == BOT_ID: return True
+    if "photo" in msg: return True
+    return False
+
 # ========================================
-# COMANDOS - CORREÇÃO 2: ANTES DO COOLDOWN
+# COMANDOS
 # ========================================
 def processar_comando(texto, chat_id, user_info, is_group):
     texto = texto.lower()
-    if texto == "/start":
-        return f"👋 Opa {user_info['nome']}! Eu sou o *{BOT_NAME}*\nUse `/ajuda`"
-    if texto == "/ajuda":
-        return "*COMANDOS:* `/start` `/ajuda` `/limpar` `/status` `/hora`"
+    if texto == "/start": return f"👋 Opa {user_info['nome']}! Eu sou o *{BOT_NAME}*\nUse `/ajuda`"
+    if texto == "/ajuda": return "*COMANDOS:* `/start` `/ajuda` `/limpar` `/status` `/hora`"
     if texto == "/limpar":
         limpar_historico(chat_id, user_info["id"], is_group)
         return "🧹 Histórico limpo!"
-    if texto == "/status":
-        return f"✅ *{BOT_NAME} Online*\n👤 Users: {len(HISTORICO)}\n👥 Grupos: {len(HISTORICO_GRUPO)}"
+    if texto == "/status": return f"✅ *{BOT_NAME} Online*\n👤 Users: {len(HISTORICO)}\n👥 Grupos: {len(HISTORICO_GRUPO)}"
     if texto == "/hora":
         dt = get_datetime_info()
         return f"📅 {dt['dia_semana']}, {dt['data']}\n🕐 {dt['hora']} Sobral/CE"
@@ -135,28 +205,21 @@ def processar_comando(texto, chat_id, user_info, is_group):
 def call_openrouter(messages):
     if not check_global_rate_limit():
         return "⏳ Limite global atingido. Espera 1 min.", 0, "rate_limit"
-
     try:
         headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json", "HTTP-Referer": RENDER_URL, "X-Title": BOT_NAME}
         payload = {"model": MODELO, "messages": messages, "max_tokens": MAX_TOKENS_RESPOSTA}
         r = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=TIMEOUT_API)
-        tempo = round(r.elapsed.total_seconds(), 2)
-
         if r.status_code == 200:
-            resposta = r.json().get("choices", [{}])[0].get("message", {}).get("content")
-            return resposta, tempo, MODELO
-
+            return r.json().get("choices", [{}])[0].get("message", {}).get("content"), round(r.elapsed.total_seconds(), 2), MODELO
         if r.status_code == 429:
             return "⚠️ Cota da IA acabou por hoje. Volta amanhã.", 0, "quota"
-
         logging.error(f"[OPENROUTER] {r.status_code}: {r.text}")
     except Exception as e:
         logging.exception(f"[OPENROUTER ERROR]: {e}")
-
     return "⚠️ IA offline agora. Tenta em 1 min.", 0, "error"
 
 # ========================================
-# PROCESSAMENTO - ORDEM CORRIGIDA
+# PROCESSAMENTO
 # ========================================
 def processar_mensagem(msg):
     try:
@@ -165,24 +228,19 @@ def processar_mensagem(msg):
         user_info = get_user_info(user)
         is_group = chat_type in ["group", "supergroup"]
         if is_group and not deve_responder(msg, chat_type): return
-
         texto = msg.get("text", "").strip()
         has_media = "photo" in msg
 
-        # CORREÇÃO 2: COMANDO PRIMEIRO, SEMPRE
         if texto and texto.startswith("/"):
             resposta = processar_comando(texto, chat_id, user_info, is_group)
-            if resposta:
-                send_message(chat_id, resposta, reply_to=message_id)
+            if resposta: send_message(chat_id, resposta, reply_to=message_id)
             return
 
-        # DEPOIS COOLDOWN E RATE LIMIT POR USER
         if not check_cooldown(user_info["id"], is_group): return
         if not check_user_rate_limit(user_info["id"]):
             send_message(chat_id, "⏳ Você atingiu o limite de 10 msgs/hora. Espera um pouco.", reply_to=message_id)
             return
 
-        # 2. MÍDIA
         if has_media:
             file_id = msg["photo"][-1]["file_id"]
             image_base64 = get_file_from_telegram(file_id)
@@ -197,7 +255,6 @@ def processar_mensagem(msg):
             send_message(chat_id, resposta, reply_to=message_id)
             return
 
-        # 3. TEXTO
         if not texto: return
         historico = get_historico(chat_id, user_info["id"], is_group)
         system = montar_system_prompt(user_info)
@@ -215,6 +272,7 @@ def processar_mensagem(msg):
 # ========================================
 @app.route(f'/{TELEGRAM_TOKEN}', methods=['POST'])
 def webhook():
+    if not BOT_INICIADO: init_bot_info()
     data = request.get_json()
     if not data: return "ok"
     update_id = data.get("update_id")
@@ -225,11 +283,13 @@ def webhook():
 
 @app.route('/')
 def index(): return f"{BOT_NAME} online ✅", 200
+
 @app.route('/health')
-def health(): return "ok", 200
+def health():
+    if not BOT_INICIADO: init_bot_info()
+    return "ok", 200
 
-init_bot_info()
-
+# TIREI O init_bot_info() DAQUI PRA GUNICORN NÃO QUEBRAR
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
