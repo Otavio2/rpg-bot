@@ -10,7 +10,7 @@ from collections import defaultdict, deque
 from flask import Flask, request
 from concurrent.futures import ThreadPoolExecutor
 
-app = Flask(__name__) # CORRIGIDO: era Flask(name)
+app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 
 # ========================================
@@ -30,15 +30,13 @@ if not TELEGRAM_TOKEN: raise RuntimeError("TELEGRAM_TOKEN não configurado")
 if not OPENROUTER_API_KEY: raise RuntimeError("OPENROUTER_API_KEY não configurada")
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions" # CORRIGIDO: URL OFICIAL
 
 BOT_ID = None
 BOT_USERNAME = None
 
-# CORREÇÃO 1: USAR O ROTEADOR OFICIAL DA OPENROUTER
-MODELO_PRINCIPAL = "openrouter/auto" # Pega o melhor modelo pago/free disponível
-MODELO_FREE = "openrouter/free" # Só modelos 100% gratuitos. Ele escolhe o melhor pra cada tarefa
-MODELO_FALLBACK = "openrouter/free" # Se o auto falhar, cai no free
+# CORREÇÃO: SÓ USA O ROTEADOR FREE. ELE JÁ ESCOLHE O MELHOR
+MODELO = "openrouter/free"
 
 # ========================================
 # LIMITES
@@ -48,7 +46,7 @@ HISTORICO_LIMITE_USER = 10
 HISTORICO_LIMITE_GRUPO = 6
 MAX_MSG_LENGTH = 4000
 TIMEOUT_API = 60
-COOLDOWN_SEGUNDOS = 3
+COOLDOWN_SEGUNDOS = 2
 
 # ========================================
 # MEMÓRIA TEMPORÁRIA
@@ -57,7 +55,7 @@ HISTORICO = defaultdict(lambda: deque(maxlen=HISTORICO_LIMITE_USER))
 HISTORICO_GRUPO = defaultdict(lambda: deque(maxlen=HISTORICO_LIMITE_GRUPO))
 USER_COOLDOWN = {}
 LOCK = threading.Lock()
-PROCESSED_UPDATES = set()
+PROCESSED_UPDATES = deque(maxlen=1000)
 executor = ThreadPoolExecutor(max_workers=5)
 
 # ========================================
@@ -92,8 +90,10 @@ def send_message(chat_id, text, reply_to=None):
 
 def get_file_from_telegram(file_id):
     r = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}")
+    r.raise_for_status()
     file_path = r.json()["result"]["file_path"]
     img = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}")
+    img.raise_for_status()
     return base64.b64encode(img.content).decode("utf-8")
 
 def get_user_info(user):
@@ -124,30 +124,34 @@ def get_datetime_info():
     }
 
 # ========================================
-# OPENROUTER COM FALLBACK INTELIGENTE
+# OPENROUTER COM RETRY INTELIGENTE
 # ========================================
-def call_openrouter(messages, usa_free=False):
-    # CORREÇÃO 2: FALLBACK SÓ TROCA O MODELO, NÃO A ESTRUTURA
-    modelos_tentar = [MODELO_FREE if usa_free else MODELO_PRINCIPAL, MODELO_FALLBACK]
-
-    for i, m in enumerate(modelos_tentar):
+def call_openrouter(messages):
+    # CORREÇÃO: RETRY 3 VEZES NO MESMO ROTEADOR. SE CAIU É COTA, NÃO MODELO
+    for tentativa in range(3):
         try:
-            inicio = time.time()
             headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json", "HTTP-Referer": RENDER_URL, "X-Title": BOT_NAME}
-            payload = {"model": m, "messages": messages, "max_tokens": MAX_TOKENS_RESPOSTA}
+            payload = {"model": MODELO, "messages": messages, "max_tokens": MAX_TOKENS_RESPOSTA}
             r = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=TIMEOUT_API)
-            tempo = round(time.time() - inicio, 2)
+            tempo = round(r.elapsed.total_seconds(), 2)
 
             if r.status_code == 200:
                 resposta = r.json().get("choices", [{}])[0].get("message", {}).get("content")
-                if i > 0: resposta = f"⚡ Usei modo reserva.\n\n{resposta}"
-                return resposta, tempo, m
+                return resposta, tempo, MODELO
 
-            logging.error(f"[OPENROUTER {m}] {r.status_code}: {r.text}")
+            if r.status_code in [429, 500, 503]: # Rate limit ou servidor caiu
+                wait = 2 ** tentativa # Backoff exponencial: 1s, 2s, 4s
+                logging.warning(f"[OPENROUTER] {r.status_code}. Tentativa {tentativa+1}/3. Aguardando {wait}s")
+                time.sleep(wait)
+                continue
+
+            logging.error(f"[OPENROUTER] {r.status_code}: {r.text}")
+            break # Se for 400, 401, não adianta tentar de novo
         except Exception as e:
-            logging.exception(f"[OPENROUTER ERROR {m}]: {e}")
+            logging.exception(f"[OPENROUTER ERROR]: {e}")
+            time.sleep(1)
 
-    return "⚠️ Todos os modelos estão offline agora. Tenta de novo em 1 min.", 0, "nenhum"
+    return "⚠️ OpenRouter lotada agora. Tenta de novo em 1 min.", 0, MODELO
 
 # ========================================
 # HISTÓRICO
@@ -175,7 +179,13 @@ DATA ATUAL: {dt['dia_semana']}, {dt['data']} | HORA: {dt['hora']} | LOCAL: Sobra
 REGRAS: 1.Responda no idioma do usuário. 2.Seja direto, max 4 linhas. 3.Se perguntarem data/hora/dia, use a DATA ATUAL acima."""
 
 def deve_responder(msg, chat_type):
-    return True # HANTSEL MODE: responde tudo
+    if chat_type == "private": return True
+    texto = msg.get("text", "").lower() if msg.get("text") else ""
+    if BOT_USERNAME and f"@{BOT_USERNAME}" in texto: return True
+    if BOT_NAME.lower() in texto: return True
+    if "reply_to_message" in msg and msg["reply_to_message"].get("from", {}).get("id") == BOT_ID: return True
+    if any(k in msg for k in ["photo"]): return True
+    return False
 
 # ========================================
 # COMANDOS
@@ -194,8 +204,12 @@ def processar_comando(texto, chat_id, user_info, is_group):
         limpar_historico(chat_id, user_info["id"], is_group)
         return "🧹 Histórico limpo!"
     if texto == "/status":
-        total_users = len(HISTORICO)
-        return f"✅ Bot online\n✅ Users na memória: {total_users}\n✅ Modelo: {MODELO_FREE}"
+        return f"""✅ *{BOT_NAME} Online*
+👤 Usuários: {len(HISTORICO)}
+👥 Grupos: {len(HISTORICO_GRUPO)}
+🤖 Modelo: {MODELO}
+🧠 Memória: Temporária
+🔗 API: {'✅ OK' if OPENROUTER_API_KEY else '❌ FALTA'}"""
     if texto == "/hora":
         dt = get_datetime_info()
         return f"📅 Hoje é *{dt['dia_semana']}*, {dt['data']}\n🕐 Agora são *{dt['hora']}* em Sobral/CE"
@@ -210,7 +224,6 @@ Grupos ativos: {len(HISTORICO_GRUPO)}"""
 # PROCESSAMENTO
 # ========================================
 def processar_mensagem(msg):
-    inicio_total = time.time()
     try:
         chat = msg["chat"]; chat_id = chat["id"]; chat_type = chat["type"]
         user = msg["from"]; message_id = msg["message_id"]
@@ -220,7 +233,7 @@ def processar_mensagem(msg):
         if not check_cooldown(user_info["id"]): return
 
         texto = msg.get("text", "").strip()
-        has_media = "photo" in msg # CORREÇÃO 3: SÓ DEIXA FOTO POR ENQUANTO
+        has_media = "photo" in msg
 
         # 1. COMANDO
         if texto and texto.startswith("/"):
@@ -246,9 +259,9 @@ def processar_mensagem(msg):
                 ]
             })
             adicionar_historico(chat_id, user_info["id"], "user", f"[IMAGEM] {texto}", is_group)
-            resposta, tempo_ia, modelo_usado = call_openrouter(messages, usa_free=True) # Força usar free pra imagem
+            resposta, tempo_ia, _ = call_openrouter(messages)
             adicionar_historico(chat_id, user_info["id"], "assistant", resposta, is_group)
-            logging.info(f"[REQ IMG] {user_info['nome']} | Modelo: {modelo_usado} | {tempo_ia}s")
+            logging.info(f"[REQ IMG] {user_info['nome']} | {tempo_ia}s")
             send_message(chat_id, resposta, reply_to=message_id)
             return
 
@@ -258,9 +271,9 @@ def processar_mensagem(msg):
         system = montar_system_prompt(user_info)
         messages = [{"role": "system", "content": system}] + historico + [{"role": "user", "content": texto}]
         adicionar_historico(chat_id, user_info["id"], "user", texto, is_group)
-        resposta, tempo_ia, modelo_usado = call_openrouter(messages, usa_free=False) # Tenta o auto primeiro
+        resposta, tempo_ia, _ = call_openrouter(messages)
         adicionar_historico(chat_id, user_info["id"], "assistant", resposta, is_group)
-        logging.info(f"[REQ] {user_info['nome']} | Modelo: {modelo_usado} | {tempo_ia}s")
+        logging.info(f"[REQ] {user_info['nome']} | {tempo_ia}s")
         send_message(chat_id, resposta, reply_to=message_id)
 
     except Exception as e:
@@ -276,7 +289,7 @@ def webhook():
     update_id = data.get("update_id")
     with LOCK:
         if update_id in PROCESSED_UPDATES: return "ok"
-        PROCESSED_UPDATES.add(update_id)
+        PROCESSED_UPDATES.append(update_id)
     if msg := data.get("message"): executor.submit(processar_mensagem, msg)
     return "ok"
 
@@ -290,6 +303,6 @@ def health():
 
 init_bot_info()
 
-if __name__ == '__main__': # CORRIGIDO: era if name
+if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
