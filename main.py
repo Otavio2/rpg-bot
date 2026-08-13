@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(m
 # ========================================
 # CONFIGURAÇÃO
 # ========================================
-BOT_NAME = "NIOBIOchat_BOT"
+BOT_NAME = "Matheus"
 CREATOR = "Kleber"
 CREATOR_ID = "8398287578" # SEU ID
 ADMINS = ["8398287578"]
