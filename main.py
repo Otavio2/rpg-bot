@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(m
 # ========================================
 # === CONFIG V1.1 CENTRALIZADA ===========
 # ========================================
-BOT_NAME = "SuperBot"
+BOT_NAME = "@NIOBIOchat_BOT"
 CREATOR = "Kleber"
 CREATOR_ID = "8398287578" # TROCA PELO TEU ID
 ADMINS = ["8398287578"]
