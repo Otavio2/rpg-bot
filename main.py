@@ -308,8 +308,9 @@ def webhook():
     executor.submit(processar_mensagem, msg)
     return "ok"
 
-@app.route('/health')
-def health(): return "ok", 200
+@app.route('/')
+def index(): 
+    return f"{BOT_NAME} online ✅", 200
 
 if __name__ == '__main__':
     init_bot_info()
