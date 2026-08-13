@@ -189,7 +189,8 @@ def processar_comando(texto, chat_id, user_info, is_group):
 `/ajuda` - Lista de comandos
 `/limpar` - Limpa histórico
 `/status` - Status do bot
-`/admin` - Painel do criador"""
+`/admin` - Painel do criador
+`/hora` - Ver data e hora atual"""
     if texto == "/limpar":
         limpar_historico(chat_id, user_info["id"], is_group)
         return "🧹 Histórico limpo!"
