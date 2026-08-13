@@ -8,9 +8,9 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 
 # ========================================
-# === CONFIG V1.1 CENTRALIZADA ===========
+# === CONFIG V1.2 CENTRALIZADA ===========
 # ========================================
-BOT_NAME = "@NIOBIOchat_BOT"
+BOT_NAME = "NIOBIOchat_BOT" # SEM @
 CREATOR = "Kleber"
 CREATOR_ID = "8398287578" # TROCA PELO TEU ID
 ADMINS = ["8398287578"]
@@ -18,6 +18,7 @@ ADMINS = ["8398287578"]
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+RENDER_URL = "https://edu-bot-6yfa.onrender.com" # COLOCA TUA URL AQUI
 
 BOT_ID = None
 BOT_USERNAME = None
@@ -126,7 +127,7 @@ def selecionar_modelo(intencao):
 
 def call_openrouter(messages, modelo_primario, max_tokens=MAX_TOKENS_RESPOSTA, temperatura=0.7):
     modelos_tentar = [modelo_primario] + [m for m in FALLBACK_MODELOS if m!= modelo_primario]
-    ultimo_erro = None
+    ultimo_erro = "Desconhecido"
 
     for i, modelo_atual in enumerate(modelos_tentar):
         try:
@@ -134,7 +135,7 @@ def call_openrouter(messages, modelo_primario, max_tokens=MAX_TOKENS_RESPOSTA, t
             headers = {
                 "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                 "Content-Type": "application/json",
-                "HTTP-Referer": "https://superbot.telegram",
+                "HTTP-Referer": RENDER_URL,
                 "X-Title": BOT_NAME
             }
             payload = {
@@ -151,10 +152,16 @@ def call_openrouter(messages, modelo_primario, max_tokens=MAX_TOKENS_RESPOSTA, t
                 if i > 0: logging.info(f"[FALLBACK] Usado {modelo_atual} após falha. Tempo: {tempo}s")
                 return r.json()["choices"][0]["message"]["content"], modelo_atual, tempo
 
-            if r.status_code in [429, 500, 502, 503, 504, 408]:
-                ultimo_erro = f"{r.status_code}"
-                logging.warning(f"[OPENROUTER] {modelo_atual} falhou {r.status_code}. Tentando próximo...")
-                continue
+            # LOGA O ERRO REAL DA API
+            erro_body = r.text
+            ultimo_erro = f"{r.status_code}: {erro_body[:150]}"
+            logging.error(f"[OPENROUTER] {modelo_atual} falhou {r.status_code}. Body: {erro_body}")
+
+            # Se for 401/402/403 não adianta tentar outros modelos
+            if r.status_code in [401, 402, 403]:
+                return f"❌ Erro na API Key da OpenRouter: {r.status_code}\nMotivo: {erro_body}", None, 0
+
+            time.sleep(1) # Espera 1s antes do próximo fallback
 
         except requests.Timeout:
             ultimo_erro = "timeout"
@@ -163,7 +170,7 @@ def call_openrouter(messages, modelo_primario, max_tokens=MAX_TOKENS_RESPOSTA, t
             ultimo_erro = str(e)
             logging.exception(f"[OPENROUTER ERROR] {modelo_atual}: {e}")
 
-    return f"Deu ruim em todos os modelos aqui 😅 Erro: {ultimo_erro}. Tenta de novo em 10s?", None, 0
+    return f"Deu ruim em todos os modelos aqui 😅 Último erro: {ultimo_erro}", None, 0
 
 def adicionar_historico(chat_id, user_id, role, content, is_group=False):
     content = content[:MAX_MSG_LENGTH]
@@ -249,7 +256,7 @@ def processar_mensagem(msg):
         if not check_cooldown(user_info["id"]):
             return
 
-        # HEURÍSTICA RÁPIDA PRA SELECIONAR MODELO SEM GASTAR TOKEN
+        # HEURÍSTICA RÁPIDA PRA SELECIONAR MODELO
         texto_lower = texto.lower()
         intencao = "CONVERSA"
         if "```" in texto or "def " in texto or "function" in texto or "error" in texto_lower:
@@ -309,9 +316,13 @@ def webhook():
     return "ok"
 
 @app.route('/')
-def index(): 
+def index():
     return f"{BOT_NAME} online ✅", 200
+
+@app.route('/health')
+def health(): return "ok", 200
 
 if __name__ == '__main__':
     init_bot_info()
-    app.run(host='0.0.0.0', port=8080)
+    port = int(os.environ.get("PORT", 8080)) # CORRIGIDO PRA RENDER
+    app.run(host='0.0.0.0', port=port)
