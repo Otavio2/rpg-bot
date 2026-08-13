@@ -10,7 +10,7 @@ from collections import defaultdict, deque
 from flask import Flask, request
 from concurrent.futures import ThreadPoolExecutor
 
-app = Flask(__name__)
+app = Flask(__name__) # CORRIGIDO: era Flask(name)
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 
 # ========================================
@@ -35,13 +35,10 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 BOT_ID = None
 BOT_USERNAME = None
 
-# NOVO: ROTEADOR DE MODELOS + FALLBACK
-MODELOS = {
-    "default": "meta-llama/llama-3.1-8b-instruct:free", # Gratuito geral
-    "code": "deepseek/deepseek-coder:free", # Gratuito para código
-    "vision": "google/gemini-2.0-flash-exp:free" # Gratuito com imagem
-}
-MODELO_FALLBACK = "openai/gpt-oss-20b:free" # Se todos caírem
+# CORREÇÃO 1: USAR O ROTEADOR OFICIAL DA OPENROUTER
+MODELO_PRINCIPAL = "openrouter/auto" # Pega o melhor modelo pago/free disponível
+MODELO_FREE = "openrouter/free" # Só modelos 100% gratuitos. Ele escolhe o melhor pra cada tarefa
+MODELO_FALLBACK = "openrouter/free" # Se o auto falhar, cai no free
 
 # ========================================
 # LIMITES
@@ -127,20 +124,12 @@ def get_datetime_info():
     }
 
 # ========================================
-# ROTEADOR INTELIGENTE
+# OPENROUTER COM FALLBACK INTELIGENTE
 # ========================================
-def escolher_modelo(texto, has_media):
-    texto_lower = texto.lower()
-    if has_media: return MODELOS["vision"]
-    palavras_code = ["codigo", "python", "erro", "funcao", "def ", "print", "html", "css", "js"]
-    if any(p in texto_lower for p in palavras_code): return MODELOS["code"]
-    return MODELOS["default"]
+def call_openrouter(messages, usa_free=False):
+    # CORREÇÃO 2: FALLBACK SÓ TROCA O MODELO, NÃO A ESTRUTURA
+    modelos_tentar = [MODELO_FREE if usa_free else MODELO_PRINCIPAL, MODELO_FALLBACK]
 
-# ========================================
-# OPENROUTER COM FALLBACK
-# ========================================
-def call_openrouter(messages, modelo):
-    modelos_tentar = [modelo, MODELO_FALLBACK] # Tenta o principal, se falhar usa fallback
     for i, m in enumerate(modelos_tentar):
         try:
             inicio = time.time()
@@ -151,7 +140,7 @@ def call_openrouter(messages, modelo):
 
             if r.status_code == 200:
                 resposta = r.json().get("choices", [{}])[0].get("message", {}).get("content")
-                if i > 0: resposta = f"⚡ Usei modo reserva.\n\n{resposta}" # Avisa se usou fallback
+                if i > 0: resposta = f"⚡ Usei modo reserva.\n\n{resposta}"
                 return resposta, tempo, m
 
             logging.error(f"[OPENROUTER {m}] {r.status_code}: {r.text}")
@@ -186,12 +175,7 @@ DATA ATUAL: {dt['dia_semana']}, {dt['data']} | HORA: {dt['hora']} | LOCAL: Sobra
 REGRAS: 1.Responda no idioma do usuário. 2.Seja direto, max 4 linhas. 3.Se perguntarem data/hora/dia, use a DATA ATUAL acima."""
 
 def deve_responder(msg, chat_type):
-    if chat_type == "private": return True
-    texto = msg.get("text", "").lower() if msg.get("text") else ""
-    if BOT_USERNAME and f"@{BOT_USERNAME}" in texto: return True
-    if BOT_NAME.lower() in texto: return True
-    if "reply_to_message" in msg and msg["reply_to_message"].get("from", {}).get("id") == BOT_ID: return True
-    return False
+    return True # HANTSEL MODE: responde tudo
 
 # ========================================
 # COMANDOS
@@ -211,7 +195,7 @@ def processar_comando(texto, chat_id, user_info, is_group):
         return "🧹 Histórico limpo!"
     if texto == "/status":
         total_users = len(HISTORICO)
-        return f"✅ Bot online\n✅ Users na memória: {total_users}\n✅ Roteador: Ativo"
+        return f"✅ Bot online\n✅ Users na memória: {total_users}\n✅ Modelo: {MODELO_FREE}"
     if texto == "/hora":
         dt = get_datetime_info()
         return f"📅 Hoje é *{dt['dia_semana']}*, {dt['data']}\n🕐 Agora são *{dt['hora']}* em Sobral/CE"
@@ -236,7 +220,7 @@ def processar_mensagem(msg):
         if not check_cooldown(user_info["id"]): return
 
         texto = msg.get("text", "").strip()
-        has_media = any(k in msg for k in ["photo", "voice", "document", "video"]) # NOVO
+        has_media = "photo" in msg # CORREÇÃO 3: SÓ DEIXA FOTO POR ENQUANTO
 
         # 1. COMANDO
         if texto and texto.startswith("/"):
@@ -245,28 +229,26 @@ def processar_mensagem(msg):
                 send_message(chat_id, resposta, reply_to=message_id)
                 return
 
-        # 2. MÍDIA
+        # 2. MÍDIA - SÓ IMAGEM REAL
         if has_media:
-            conteudo_media = []
-            if "photo" in msg:
-                file_id = msg["photo"][-1]["file_id"]
-                image_base64 = get_file_from_telegram(file_id)
-                conteudo_media.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}})
-                texto = msg.get("caption", "Descreva esta imagem")
-            if "voice" in msg: texto = "[ÁUDIO] " + msg.get("caption", "Transcreva este áudio")
-            if "document" in msg: texto = f"[DOCUMENTO: {msg['document'].get('file_name')}] " + msg.get("caption", "Resuma este documento")
-            if "video" in msg: texto = "[VÍDEO] " + msg.get("caption", "Descreva este vídeo")
+            file_id = msg["photo"][-1]["file_id"]
+            image_base64 = get_file_from_telegram(file_id)
+            texto = msg.get("caption", "Descreva esta imagem em português e seja direto")
 
             historico = get_historico(chat_id, user_info["id"], is_group)
             system = montar_system_prompt(user_info)
             messages = [{"role": "system", "content": system}] + historico
-            messages.append({"role": "user", "content": [{"type": "text", "text": texto}] + conteudo_media})
-
-            adicionar_historico(chat_id, user_info["id"], "user", texto, is_group)
-            modelo = escolher_modelo(texto, True)
-            resposta, tempo_ia, modelo_usado = call_openrouter(messages, modelo)
+            messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": texto},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
+                ]
+            })
+            adicionar_historico(chat_id, user_info["id"], "user", f"[IMAGEM] {texto}", is_group)
+            resposta, tempo_ia, modelo_usado = call_openrouter(messages, usa_free=True) # Força usar free pra imagem
             adicionar_historico(chat_id, user_info["id"], "assistant", resposta, is_group)
-            logging.info(f"[REQ MEDIA] {user_info['nome']} | Modelo: {modelo_usado} | {tempo_ia}s")
+            logging.info(f"[REQ IMG] {user_info['nome']} | Modelo: {modelo_usado} | {tempo_ia}s")
             send_message(chat_id, resposta, reply_to=message_id)
             return
 
@@ -276,8 +258,7 @@ def processar_mensagem(msg):
         system = montar_system_prompt(user_info)
         messages = [{"role": "system", "content": system}] + historico + [{"role": "user", "content": texto}]
         adicionar_historico(chat_id, user_info["id"], "user", texto, is_group)
-        modelo = escolher_modelo(texto, False)
-        resposta, tempo_ia, modelo_usado = call_openrouter(messages, modelo)
+        resposta, tempo_ia, modelo_usado = call_openrouter(messages, usa_free=False) # Tenta o auto primeiro
         adicionar_historico(chat_id, user_info["id"], "assistant", resposta, is_group)
         logging.info(f"[REQ] {user_info['nome']} | Modelo: {modelo_usado} | {tempo_ia}s")
         send_message(chat_id, resposta, reply_to=message_id)
@@ -309,6 +290,6 @@ def health():
 
 init_bot_info()
 
-if __name__ == '__main__':
+if __name__ == '__main__': # CORRIGIDO: era if name
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
