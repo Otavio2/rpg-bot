@@ -5,7 +5,7 @@ import time
 import logging
 import base64
 from datetime import datetime
-import pytz # NOVO
+import pytz
 from collections import defaultdict, deque
 from flask import Flask, request
 from concurrent.futures import ThreadPoolExecutor
@@ -18,9 +18,9 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(m
 # ========================================
 BOT_NAME = "Matheus"
 CREATOR = "Kleber"
-CREATOR_ID = "8398287578" # SEU ID
+CREATOR_ID = "8398287578"
 ADMINS = ["8398287578"]
-TIMEZONE = "America/Fortaleza" # Sobral/CE
+TIMEZONE = "America/Fortaleza"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
@@ -34,7 +34,14 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 BOT_ID = None
 BOT_USERNAME = None
-MODELO_VISION = "openrouter/free" # Modelo gratuito com suporte a imagem
+
+# NOVO: ROTEADOR DE MODELOS + FALLBACK
+MODELOS = {
+    "default": "meta-llama/llama-3.1-8b-instruct:free", # Gratuito geral
+    "code": "deepseek/deepseek-coder:free", # Gratuito para código
+    "vision": "google/gemini-2.0-flash-exp:free" # Gratuito com imagem
+}
+MODELO_FALLBACK = "openai/gpt-oss-20b:free" # Se todos caírem
 
 # ========================================
 # LIMITES
@@ -113,36 +120,45 @@ def get_datetime_info():
     agora = datetime.now(tz)
     dias_semana = ["segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"]
     dia_semana = dias_semana[agora.weekday()]
-    data_formatada = agora.strftime("%d/%m/%Y")
-    hora_formatada = agora.strftime("%H:%M")
     return {
         "dia_semana": dia_semana,
-        "data": data_formatada,
-        "hora": hora_formatada,
-        "datetime_full": agora.strftime("%d/%m/%Y %H:%M")
+        "data": agora.strftime("%d/%m/%Y"),
+        "hora": agora.strftime("%H:%M"),
     }
 
 # ========================================
-# OPENROUTER COM IMAGEM
+# ROTEADOR INTELIGENTE
 # ========================================
-def call_openrouter(messages):
-    try:
-        inicio = time.time()
-        headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json", "HTTP-Referer": RENDER_URL, "X-Title": BOT_NAME}
-        payload = {"model": MODELO_VISION, "messages": messages, "max_tokens": MAX_TOKENS_RESPOSTA}
-        r = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=TIMEOUT_API)
-        tempo = round(time.time() - inicio, 2)
+def escolher_modelo(texto, has_media):
+    texto_lower = texto.lower()
+    if has_media: return MODELOS["vision"]
+    palavras_code = ["codigo", "python", "erro", "funcao", "def ", "print", "html", "css", "js"]
+    if any(p in texto_lower for p in palavras_code): return MODELOS["code"]
+    return MODELOS["default"]
 
-        if r.status_code == 200:
-            resposta = r.json().get("choices", [{}])[0].get("message", {}).get("content")
-            return resposta, tempo
+# ========================================
+# OPENROUTER COM FALLBACK
+# ========================================
+def call_openrouter(messages, modelo):
+    modelos_tentar = [modelo, MODELO_FALLBACK] # Tenta o principal, se falhar usa fallback
+    for i, m in enumerate(modelos_tentar):
+        try:
+            inicio = time.time()
+            headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json", "HTTP-Referer": RENDER_URL, "X-Title": BOT_NAME}
+            payload = {"model": m, "messages": messages, "max_tokens": MAX_TOKENS_RESPOSTA}
+            r = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=TIMEOUT_API)
+            tempo = round(time.time() - inicio, 2)
 
-        logging.error(f"[OPENROUTER] {r.status_code}: {r.text}")
-        if r.status_code == 402: return "⚠️ Limite gratuito da OpenRouter atingido. Volta em algumas horas.", tempo
-        return f"⚠️ Erro {r.status_code} da OpenRouter", tempo
-    except Exception as e:
-        logging.exception(f"[OPENROUTER ERROR]: {e}")
-        return "⚠️ Erro ao processar.", 0
+            if r.status_code == 200:
+                resposta = r.json().get("choices", [{}])[0].get("message", {}).get("content")
+                if i > 0: resposta = f"⚡ Usei modo reserva.\n\n{resposta}" # Avisa se usou fallback
+                return resposta, tempo, m
+
+            logging.error(f"[OPENROUTER {m}] {r.status_code}: {r.text}")
+        except Exception as e:
+            logging.exception(f"[OPENROUTER ERROR {m}]: {e}")
+
+    return "⚠️ Todos os modelos estão offline agora. Tenta de novo em 1 min.", 0, "nenhum"
 
 # ========================================
 # HISTÓRICO
@@ -163,11 +179,12 @@ def limpar_historico(chat_id, user_id, is_group):
         else: HISTORICO[str(user_id)].clear()
 
 def montar_system_prompt(user_info):
-    dt = get_datetime_info() # PEGA DATA/HORA ATUAL
+    dt = get_datetime_info()
     identidade = f"Você está falando com {CREATOR}, o CRIADOR do bot. Seja familiar e zoeiro." if user_info["tipo"] == "criador" else f"Usuário: {user_info['nome']}"
     return f"""Você é {BOT_NAME}, assistente para Telegram. {identidade}
-DATA ATUAL: {dt['dia_semana']}, {dt['data']} | HORA: {dt['hora']} |
+DATA ATUAL: {dt['dia_semana']}, {dt['data']} | HORA: {dt['hora']} | LOCAL: Sobral, Ceará
 REGRAS: 1.Responda no idioma do usuário. 2.Seja direto, max 4 linhas. 3.Se perguntarem data/hora/dia, use a DATA ATUAL acima."""
+
 def deve_responder(msg, chat_type):
     if chat_type == "private": return True
     texto = msg.get("text", "").lower() if msg.get("text") else ""
@@ -188,26 +205,21 @@ def processar_comando(texto, chat_id, user_info, is_group):
 `/start` - Boas vindas
 `/ajuda` - Lista de comandos
 `/limpar` - Limpa histórico
-`/status` - Status do bot
-`/admin` - Painel do criador
-`/hora` - Ver data e hora atual"""
+`/status` - Status do bot"""
     if texto == "/limpar":
         limpar_historico(chat_id, user_info["id"], is_group)
         return "🧹 Histórico limpo!"
     if texto == "/status":
         total_users = len(HISTORICO)
-        return f"✅ Bot online\n✅ Users na memória: {total_users}\n✅ Modelo: {MODELO_VISION}"
+        return f"✅ Bot online\n✅ Users na memória: {total_users}\n✅ Roteador: Ativo"
     if texto == "/hora":
         dt = get_datetime_info()
         return f"📅 Hoje é *{dt['dia_semana']}*, {dt['data']}\n🕐 Agora são *{dt['hora']}* em Sobral/CE"
     if texto == "/admin":
-        if user_info["tipo"]!= "criador":
-            return "❌ Você não tem permissão."
+        if user_info["tipo"]!= "criador": return "❌ Você não tem permissão."
         return f"""*PAINEL ADMIN - {CREATOR}*
 Users ativos: {len(HISTORICO)}
-Grupos ativos: {len(HISTORICO_GRUPO)}
-Modelo: {MODELO_VISION}
-API: {'✅ OK' if OPENROUTER_API_KEY else '❌ FALTA'}"""
+Grupos ativos: {len(HISTORICO_GRUPO)}"""
     return None
 
 # ========================================
@@ -224,7 +236,7 @@ def processar_mensagem(msg):
         if not check_cooldown(user_info["id"]): return
 
         texto = msg.get("text", "").strip()
-        has_image = "photo" in msg
+        has_media = any(k in msg for k in ["photo", "voice", "document", "video"]) # NOVO
 
         # 1. COMANDO
         if texto and texto.startswith("/"):
@@ -233,26 +245,28 @@ def processar_mensagem(msg):
                 send_message(chat_id, resposta, reply_to=message_id)
                 return
 
-        # 2. IMAGEM
-        if has_image:
-            file_id = msg["photo"][-1]["file_id"]
-            image_base64 = get_file_from_telegram(file_id)
-            texto = msg.get("caption", "Descreva esta imagem")
+        # 2. MÍDIA
+        if has_media:
+            conteudo_media = []
+            if "photo" in msg:
+                file_id = msg["photo"][-1]["file_id"]
+                image_base64 = get_file_from_telegram(file_id)
+                conteudo_media.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}})
+                texto = msg.get("caption", "Descreva esta imagem")
+            if "voice" in msg: texto = "[ÁUDIO] " + msg.get("caption", "Transcreva este áudio")
+            if "document" in msg: texto = f"[DOCUMENTO: {msg['document'].get('file_name')}] " + msg.get("caption", "Resuma este documento")
+            if "video" in msg: texto = "[VÍDEO] " + msg.get("caption", "Descreva este vídeo")
 
             historico = get_historico(chat_id, user_info["id"], is_group)
             system = montar_system_prompt(user_info)
             messages = [{"role": "system", "content": system}] + historico
-            messages.append({
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": texto},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
-                ]
-            })
-            adicionar_historico(chat_id, user_info["id"], "user", f"[IMAGEM] {texto}", is_group)
-            resposta, tempo_ia = call_openrouter(messages)
+            messages.append({"role": "user", "content": [{"type": "text", "text": texto}] + conteudo_media})
+
+            adicionar_historico(chat_id, user_info["id"], "user", texto, is_group)
+            modelo = escolher_modelo(texto, True)
+            resposta, tempo_ia, modelo_usado = call_openrouter(messages, modelo)
             adicionar_historico(chat_id, user_info["id"], "assistant", resposta, is_group)
-            logging.info(f"[REQ IMG] {user_info['nome']} | {tempo_ia}s")
+            logging.info(f"[REQ MEDIA] {user_info['nome']} | Modelo: {modelo_usado} | {tempo_ia}s")
             send_message(chat_id, resposta, reply_to=message_id)
             return
 
@@ -262,9 +276,10 @@ def processar_mensagem(msg):
         system = montar_system_prompt(user_info)
         messages = [{"role": "system", "content": system}] + historico + [{"role": "user", "content": texto}]
         adicionar_historico(chat_id, user_info["id"], "user", texto, is_group)
-        resposta, tempo_ia = call_openrouter(messages)
+        modelo = escolher_modelo(texto, False)
+        resposta, tempo_ia, modelo_usado = call_openrouter(messages, modelo)
         adicionar_historico(chat_id, user_info["id"], "assistant", resposta, is_group)
-        logging.info(f"[REQ] {user_info['nome']}({user_info['tipo']}) | {tempo_ia}s")
+        logging.info(f"[REQ] {user_info['nome']} | Modelo: {modelo_usado} | {tempo_ia}s")
         send_message(chat_id, resposta, reply_to=message_id)
 
     except Exception as e:
@@ -292,7 +307,6 @@ def index():
 def health():
     return "ok", 200
 
-# INICIALIZAÇÃO PRA GUNICORN
 init_bot_info()
 
 if __name__ == '__main__':
