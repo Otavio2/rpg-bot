@@ -1,349 +1,316 @@
-import logging
-import os
-import re
-import time
-
-import requests
+import os, requests, threading, time, logging, re, json
+from collections import defaultdict, deque
+from datetime import datetime, timedelta
 from flask import Flask, request
-
-from config import (
-    BOT_NAME,
-    CREATOR,
-    BOT_ID,
-    BOT_USERNAME,
-    TELEGRAM_TOKEN,
-    TELEGRAM_API_URL,
-    TIMEOUT_API,
-    BOT_TAG,
-)
-
-from ai import (
-    call_ai_smart,
-    extrair_dados_automaticos,
-)
-
-from database import (
-    save_message,
-    buscar_dados_usuario, # <- ADICIONADO
-)
-
-from media import (
-    analisar_midia_com_gemini,
-)
-
-from commands import (
-    handle_command,
-)
-
-from messages import (
-    responder_saudacao,
-    enviar_resposta,
-)
-
-from webhook import (
-    processar_webhook,
-)
-
-# ==========================================================
-# FLASK + CONFIG
-# ==========================================================
+from concurrent.futures import ThreadPoolExecutor
 
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] %(levelname)s: %(message)s"
-)
+# ========================================
+# === CONFIG V1.1 CENTRALIZADA ===========
+# ========================================
+BOT_NAME = "SuperBot"
+CREATOR = "Kleber"
+CREATOR_ID = "8398287578" # TROCA PELO TEU ID
+ADMINS = ["8398287578"]
 
-session = requests.Session()
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-COOLDOWN_SAUDACAO = 60 # segundos
-COOLDOWN_BOAS_VINDAS = 120 # segundos
+BOT_ID = None
+BOT_USERNAME = None
 
-ultima_saudacao_grupo = {}
-ultima_boas_vindas_grupo = {}
+# MODELOS OPENROUTER
+MODELOS = {
+    "principal": "deepseek/deepseek-chat-v3.1", # Raciocínio + Geral
+    "codigo": "qwen/qwen-2.5-coder-32b-instruct", # Programação
+    "criativo": "google/gemini-2.0-flash-exp", # Criatividade + Rápido
+    "resumo": "meta-llama/llama-3.1-8b-instruct", # Barato pra resumo/tradução
+}
+FALLBACK_MODELOS = [
+    "deepseek/deepseek-chat-v3.1",
+    "google/gemini-2.0-flash-exp",
+    "meta-llama/llama-3.1-8b-instruct"
+]
 
-BOT_ID_INT = int(BOT_ID) if BOT_ID else None # Normaliza pra int
+# LIMITES E PROTEÇÃO
+MAX_TOKENS_RESPOSTA = 600
+HISTORICO_LIMITE_USER = 12
+HISTORICO_LIMITE_GRUPO = 8
+MAX_MSG_LENGTH = 4000
+TIMEOUT_API = 30
+COOLDOWN_SEGUNDOS = 3 # Anti-spam por usuário
 
-# ==========================================================
-# FUNÇÕES AUXILIARES CORRIGIDAS
-# ==========================================================
+if not TELEGRAM_TOKEN: raise RuntimeError("TELEGRAM_TOKEN não configurado")
+if not OPENROUTER_API_KEY: raise RuntimeError("OPENROUTER_API_KEY não configurado")
 
-def safe_lower(text):
-    return text.lower() if text else ""
+# ========================================
+# === MEMÓRIA TEMPORÁRIA EM RAM ==========
+# ========================================
+HISTORICO = defaultdict(lambda: deque(maxlen=HISTORICO_LIMITE_USER))
+HISTORICO_GRUPO = defaultdict(lambda: deque(maxlen=HISTORICO_LIMITE_GRUPO))
+USER_COOLDOWN = {} # {user_id: timestamp}
+LOCK = threading.Lock()
+PROCESSED_UPDATES = set()
 
-def bot_foi_mencionado(msg):
-    """Detecta nome, @username, mention e reply - sem falso positivo"""
-    text = msg.get("text", "")
-    texto_lower = safe_lower(text)
-    
-    # 1. Reply direto ao bot - NORMALIZADO
-    if "reply_to_message" in msg:
-        reply = msg["reply_to_message"]
-        reply_id = reply.get("from", {}).get("id")
-        if BOT_ID_INT and reply_id == BOT_ID_INT:
-            logging.info(f"[REPLY] Resposta direta ao bot detectada")
-            return True
-    
-    # 2. Menção via entities do Telegram - inclui text_mention
-    if "entities" in msg:
-        for entity in msg["entities"]:
-            if entity["type"] in ["mention", "text_mention"]:
-                if entity["type"] == "mention":
-                    mention = text[entity["offset"]:entity["offset"]+entity["length"]]
-                    if BOT_USERNAME and safe_lower(mention) == f"@{BOT_USERNAME.lower()}":
-                        return True
-                elif entity["type"] == "text_mention":
-                    user = entity.get("user", {})
-                    if user.get("id") == BOT_ID_INT:
-                        return True
-    
-    # 3. Nome ou @username como palavra separada - SEM FALSO POSITIVO
-    if BOT_NAME:
-        pattern = rf"\b{re.escape(BOT_NAME)}\b"
-        if re.search(pattern, text, flags=re.IGNORECASE):
-            return True
-            
-    if BOT_USERNAME:
-        pattern = rf"@{re.escape(BOT_USERNAME)}\b"
-        if re.search(pattern, text, flags=re.IGNORECASE):
-            return True
-    
-    return False
+# THREAD POOL
+executor = ThreadPoolExecutor(max_workers=10)
 
-def remover_chamada(user_text):
-    """Remove só o nome/@ do texto - com escape seguro"""
-    if not user_text: return ""
-    patterns = []
-    if BOT_NAME:
-        patterns.append(rf"\b{re.escape(BOT_NAME)}\b")
-    if BOT_USERNAME:
-        patterns.append(rf"@{re.escape(BOT_USERNAME)}\b")
-    
-    if not patterns: return user_text
-    
-    full_pattern = "|".join(patterns)
-    return re.sub(full_pattern, "", user_text, flags=re.IGNORECASE).strip(",. ").strip()
-
-def pode_responder_saudacao(chat_id):
-    agora = time.time()
-    ultimo = ultima_saudacao_grupo.get(chat_id, 0)
-    if agora - ultimo > COOLDOWN_SAUDACAO:
-        ultima_saudacao_grupo[chat_id] = agora
-        return True
-    return False
-
-def pode_responder_boas_vindas(chat_id):
-    agora = time.time()
-    ultimo = ultima_boas_vindas_grupo.get(chat_id, 0)
-    if agora - ultimo > COOLDOWN_BOAS_VINDAS:
-        ultima_boas_vindas_grupo[chat_id] = agora
-        return True
-    return False
-
-# ==========================================================
-# CONTEXTO
-# ==========================================================
-
-def montar_contexto(user_id, chat_id, chat_type, chat_title):
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-
-    hora = datetime.now(ZoneInfo("America/Fortaleza"))
-    dias = ["segunda-feira","terça-feira","quarta-feira","quinta-feira","sexta-feira","sábado","domingo"]
-    meses = ["janeiro","fevereiro","março","abril","maio","junho","julho","agosto","setembro","outubro","novembro","dezembro"]
-    dia_semana = dias[hora.weekday()]
-    data_atual = f"{hora.day} de {meses[hora.month - 1]} de {hora.year}"
-    hora_atual = hora.strftime("%H:%M")
-
-    if hora.hour >= 18: saudacao = "Boa noite"
-    elif hora.hour < 12: saudacao = "Bom dia"
-    else: saudacao = "Boa tarde"
-
-    prompt = f"""
-Você é {BOT_NAME}, criado por {CREATOR}.
-Você está em um grupo chamado "{chat_title}".
-
-Data: {data_atual} - {dia_semana} - {hora_atual}
-Saudação atual: {saudacao}
-
-REGRAS:
-- Seja humano, direto, natural e amigável.
-- Use gírias brasileiras leves quando combinarem.
-- Não responda tudo. Só responda quando for chamado ou for relevante.
-- Seja breve em conversas casuais.
-- Não diga que é um robô.
-"""
-    return {"prompt": prompt, "user_id": user_id, "chat_id": chat_id, "chat_type": chat_type, "chat_title": chat_title}
-
-# ==========================================================
-# ENVIO DE MENSAGEM
-# ==========================================================
+# ========================================
+# === FUNÇÕES TELEGRAM ===================
+# ========================================
+def init_bot_info():
+    global BOT_ID, BOT_USERNAME
+    try:
+        r = requests.get(f"{TELEGRAM_API_URL}/getMe", timeout=TIMEOUT_API)
+        r.raise_for_status()
+        data = r.json()["result"]
+        BOT_ID = data["id"]
+        BOT_USERNAME = data["username"].lower()
+        logging.info(f"[BOT] Iniciado como @{BOT_USERNAME} | ID: {BOT_ID}")
+    except Exception as e:
+        logging.exception(f"[TELEGRAM ERROR] Falha ao iniciar bot: {e}")
+        raise
 
 def send_message(chat_id, text, reply_to=None):
-    try:
-        if not text: return False
-        payload = {"chat_id": chat_id, "text": text}
-        if reply_to: payload["reply_to_message_id"] = reply_to
-        response = session.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload, timeout=TIMEOUT_API)
-        if response.status_code != 200:
-            logging.warning(f"[TELEGRAM] HTTP {response.status_code}: {response.text[:300]}")
+    # Tenta com Markdown, se falhar manda texto simples
+    for parse_mode in ["Markdown", None]:
+        try:
+            payload = {"chat_id": chat_id, "text": text[:4096]}
+            if parse_mode: payload["parse_mode"] = parse_mode
+            if reply_to: payload["reply_to_message_id"] = reply_to
+            r = requests.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload, timeout=TIMEOUT_API)
+            if r.status_code == 200: return True
+            if r.status_code == 400 and parse_mode: continue # Erro de markdown, tenta sem
+        except Exception as e:
+            logging.exception(f"[TELEGRAM ERROR] {e}")
+            time.sleep(1)
+    return False
+
+def get_user_info(user):
+    user_id = str(user["id"])
+    nome = user.get("first_name", "usuário")
+    username = user.get("username", "")
+
+    if user_id == CREATOR_ID: tipo = "criador"
+    elif user_id in ADMINS: tipo = "admin"
+    else: tipo = "usuario"
+
+    return {"id": user_id, "nome": nome, "username": username, "tipo": tipo}
+
+def check_cooldown(user_id):
+    agora = time.time()
+    with LOCK:
+        ultimo = USER_COOLDOWN.get(user_id, 0)
+        if agora - ultimo < COOLDOWN_SEGUNDOS:
             return False
-        return True
-    except Exception as e:
-        logging.exception(f"[SEND MESSAGE ERROR] {e}")
-        return False
+        USER_COOLDOWN[user_id] = agora
+    return True
 
-# ==========================================================
-# SUPABASE STATUS
-# ==========================================================
+# ========================================
+# === IA + ROTEADOR + FALLBACK ===========
+# ========================================
+def selecionar_modelo(intencao):
+    mapa = {
+        "PROGRAMACAO": "codigo",
+        "CRIATIVIDADE": "criativo",
+        "RESUMO": "resumo",
+        "TRADUCAO": "resumo",
+        "RACIOCINIO": "principal",
+        "ESTUDO": "principal",
+        "CONVERSA": "criativo"
+    }
+    return MODELOS.get(mapa.get(intencao, "principal"))
 
-def get_supabase_usage():
-    try:
-        from config import SUPABASE_SERVICE_KEY
-        if not SUPABASE_SERVICE_KEY: return "❌ SUPABASE_SERVICE_KEY não configurada."
-        headers = {"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"}
-        response = session.post(f"{os.getenv('SUPABASE_URL')}/rest/v1/rpc/pg_database_size", headers=headers, json={"dbname": "postgres"}, timeout=TIMEOUT_API)
-        if response.status_code != 200: return "❌ Não foi possível consultar o banco."
-        db_bytes = response.json()
-        db_mb = db_bytes / 1024 / 1024
-        return f"📊 Banco: {db_mb:.2f} MB"
-    except Exception as e:
-        logging.exception(f"[SUPABASE STATUS ERROR] {e}")
-        return "❌ Erro ao consultar o banco."
+def call_openrouter(messages, modelo_primario, max_tokens=MAX_TOKENS_RESPOSTA, temperatura=0.7):
+    modelos_tentar = [modelo_primario] + [m for m in FALLBACK_MODELOS if m!= modelo_primario]
+    ultimo_erro = None
 
-# ==========================================================
-# PROCESSAMENTO PRINCIPAL
-# ==========================================================
+    for i, modelo_atual in enumerate(modelos_tentar):
+        try:
+            inicio = time.time()
+            headers = {
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://superbot.telegram",
+                "X-Title": BOT_NAME
+            }
+            payload = {
+                "model": modelo_atual,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperatura,
+            }
+            r = requests.post("https://openrouter.ai/api/v1/chat/completions",
+                              headers=headers, json=payload, timeout=TIMEOUT_API)
+            tempo = round(time.time() - inicio, 2)
 
-def process_message(msg):
+            if r.status_code == 200:
+                if i > 0: logging.info(f"[FALLBACK] Usado {modelo_atual} após falha. Tempo: {tempo}s")
+                return r.json()["choices"][0]["message"]["content"], modelo_atual, tempo
+
+            if r.status_code in [429, 500, 502, 503, 504, 408]:
+                ultimo_erro = f"{r.status_code}"
+                logging.warning(f"[OPENROUTER] {modelo_atual} falhou {r.status_code}. Tentando próximo...")
+                continue
+
+        except requests.Timeout:
+            ultimo_erro = "timeout"
+            logging.warning(f"[OPENROUTER] Timeout {modelo_atual}")
+        except Exception as e:
+            ultimo_erro = str(e)
+            logging.exception(f"[OPENROUTER ERROR] {modelo_atual}: {e}")
+
+    return f"Deu ruim em todos os modelos aqui 😅 Erro: {ultimo_erro}. Tenta de novo em 10s?", None, 0
+
+def adicionar_historico(chat_id, user_id, role, content, is_group=False):
+    content = content[:MAX_MSG_LENGTH]
+    with LOCK:
+        msg = {"role": role, "content": content}
+        if is_group:
+            HISTORICO_GRUPO[str(chat_id)].append(msg)
+        else:
+            HISTORICO[str(user_id)].append(msg)
+
+def get_historico(chat_id, user_id, is_group):
+    with LOCK:
+        if is_group:
+            return list(HISTORICO_GRUPO[str(chat_id)])
+        else:
+            return list(HISTORICO[str(user_id)])
+
+def montar_system_prompt(user_info, intencao):
+    if user_info["tipo"] == "criador":
+        identidade = f"Você está falando com KLEBER, o CRIADOR do bot. Seja familiar, zoeiro, pode chamar ele de Kleber."
+    elif user_info["tipo"] == "admin":
+        identidade = f"Usuário: {user_info['nome']} | Tipo: Administrador"
+    else:
+        identidade = f"Usuário: {user_info['nome']} | Tipo: Usuário comum"
+
+    prompt = f"""Você é {BOT_NAME}, assistente inteligente para Telegram.
+{identidade}
+Intenção detectada: {intencao}
+
+REGRAS CRÍTICAS:
+1. Detecte o idioma da última mensagem do usuário e RESPONDA SEMPRE no mesmo idioma. Se o usuário pedir "fale em inglês" ou "responda em espanhol", priorize.
+2. Entenda mensagens misturando idiomas.
+3. Seja direto, max 4 linhas.
+4. Se for código, use ```linguagem```. Se for lista, use - item.
+5. Mantenha personalidade consistente em qualquer idioma.
+6. Não invente informações."""
+    return prompt
+
+# ========================================
+# === PROCESSAMENTO PRINCIPAL ============
+# ========================================
+def deve_responder(msg, chat_type):
+    if chat_type == "private": return True
+
+    texto = msg.get("text", "").lower()
+
+    # 1. Verifica entities do Telegram
+    for entity in msg.get("entities", []):
+        if entity["type"] == "mention":
+            mention = texto[entity["offset"]:entity["offset"]+entity["length"]]
+            if mention == f"@{BOT_USERNAME}": return True
+
+    # 2. Verifica nome do bot no texto
+    if BOT_NAME.lower() in texto: return True
+
+    # 3. Verifica reply usando BOT_ID REAL
+    if "reply_to_message" in msg:
+        replied = msg["reply_to_message"].get("from", {})
+        if replied.get("id") == BOT_ID: return True
+
+    return False
+
+def processar_mensagem(msg):
+    inicio_total = time.time()
     try:
         chat = msg["chat"]
         chat_id = chat["id"]
         chat_type = chat["type"]
-        chat_title = chat.get("title", "")
         user = msg["from"]
-        user_id = str(user["id"])
         message_id = msg["message_id"]
-        user_text = msg.get("text", "")
+        texto = msg.get("text", "").strip()
 
-        logging.info(f"[MESSAGE] chat={chat_id} user={user_id} text={user_text[:50]}")
+        if not texto or len(texto) > MAX_MSG_LENGTH: return
 
-        # ==================================================
-        # 1. NOVO MEMBRO - BOAS VINDAS
-        # ==================================================
-        if "new_chat_members" in msg:
-            if chat_type in ["group", "supergroup"] and pode_responder_boas_vindas(chat_id):
-                nomes = [m.get("first_name", "pessoa") for m in msg["new_chat_members"]]
-                nomes_str = ", ".join(nomes)
-                texto_boasvindas = f"👋 Seja bem-vindo(a) {nomes_str}! Eu sou o {BOT_NAME}. Fica à vontade por aqui 😎"
-                send_message(chat_id, texto_boasvindas)
-                logging.info(f"[WELCOME] {nomes_str} entrou no grupo {chat_id}")
+        user_info = get_user_info(user)
+        is_group = chat_type in ["group", "supergroup"]
+
+        # VERIFICAR SE DEVE RESPONDER
+        if is_group and not deve_responder(msg, chat_type):
             return
 
-        # ==================================================
-        # 2. STICKER / GIF
-        # ==================================================
-        if "sticker" in msg:
-            descricao = analisar_midia_com_gemini(msg["sticker"]["file_id"], "sticker")
-            user_text = f"[Usuário enviou um sticker. Conteúdo: {descricao}]" if descricao else "[Usuário enviou um sticker]"
-        elif "animation" in msg:
-            descricao = analisar_midia_com_gemini(msg["animation"]["file_id"], "gif")
-            user_text = f"[Usuário enviou um GIF. Conteúdo: {descricao}]" if descricao else "[Usuário enviou um GIF]"
-        elif "document" in msg and msg["document"].get("mime_type") == "image/gif":
-            descricao = analisar_midia_com_gemini(msg["document"]["file_id"], "gif")
-            user_text = f"[Usuário enviou um GIF. Conteúdo: {descricao}]" if descricao else "[Usuário enviou um GIF]"
+        # ANTI-SPAM
+        if not check_cooldown(user_info["id"]):
+            return
 
-        if not user_text.strip(): return
-        texto_lower = safe_lower(user_text)
+        # HEURÍSTICA RÁPIDA PRA SELECIONAR MODELO SEM GASTAR TOKEN
+        texto_lower = texto.lower()
+        intencao = "CONVERSA"
+        if "```" in texto or "def " in texto or "function" in texto or "error" in texto_lower:
+            intencao = "PROGRAMACAO"
+        elif "resuma" in texto_lower or "summary" in texto_lower or "resumo" in texto_lower:
+            intencao = "RESUMO"
+        elif "traduza" in texto_lower or "translate" in texto_lower:
+            intencao = "TRADUCAO"
+        elif "?" in texto and len(texto) > 100:
+            intencao = "RACIOCINIO"
+        elif "crie" in texto_lower or "história" in texto_lower or "ideia" in texto_lower:
+            intencao = "CRIATIVIDADE"
+        elif "explique" in texto_lower or "como funciona" in texto_lower:
+            intencao = "ESTUDO"
 
-        # ==================================================
-        # 3. DETECTAR CHAMADA
-        # ==================================================
-        foi_chamado = bot_foi_mencionado(msg)
-        if foi_chamado:
-            logging.info(f"[MENTION] Bot foi chamado no chat {chat_id}")
-            user_text = remover_chamada(user_text)
-            texto_lower = safe_lower(user_text)
-            if not texto_lower:
-                responder_saudacao(chat_id, message_id, send_message)
-                return
+        modelo = selecionar_modelo(intencao)
 
-        # ==================================================
-        # 4. COMANDOS
-        # ==================================================
-        if re.match(r"^/\w+", texto_lower):
-            logging.info(f"[COMMAND] {texto_lower}")
-            executado = handle_command(chat_id, user_id, texto_lower, message_id, send_message, get_supabase_usage)
-            if executado: return
+        # MONTAR CONTEXTO + CHAMAR IA
+        historico = get_historico(chat_id, user_info["id"], is_group)
+        system = montar_system_prompt(user_info, intencao)
+        messages = [{"role": "system", "content": system}]
+        messages.extend(historico)
+        messages.append({"role": "user", "content": texto})
 
-        # ==================================================
-        # 5. SAUDAÇÃO COM COOLDOWN
-        # ==================================================
-        saudacoes = ["oi","ola","olá","bom dia","boa tarde","boa noite","eai","e aí","fala"]
-        eh_saudacao = any(texto_lower.startswith(s) for s in saudacoes) and len(texto_lower.split()) < 4
+        # CHAMAR OPENROUTER COM FALLBACK
+        adicionar_historico(chat_id, user_info["id"], "user", texto, is_group)
+        resposta, modelo_usado, tempo_ia = call_openrouter(messages, modelo)
+        adicionar_historico(chat_id, user_info["id"], "assistant", resposta, is_group)
 
-        if eh_saudacao:
-            if chat_type == "private" or (chat_type in ["group","supergroup"] and pode_responder_saudacao(chat_id)):
-                logging.info(f"[SAUDACAO] Respondendo em {chat_id}")
-                responder_saudacao(chat_id, message_id, send_message)
-                return
-            else:
-                logging.info(f"[SAUDACAO] Ignorado por cooldown em {chat_id}")
-                return
+        # LOG
+        logging.info(f"[REQ] {user_info['nome']}({user_info['tipo']}) | {intencao} | Modelo: {modelo_usado} | {tempo_ia}s | Total: {round(time.time()-inicio_total,2)}s")
 
-        # ==================================================
-        # 6. SE FOI CHAMADO OU REPLY, MANDA PRA IA
-        # ==================================================
-        if foi_chamado:
-            logging.info(f"[AI] Enviando pra IA: {user_text}")
-        else:
-            if chat_type in ["group", "supergroup"]:
-                logging.info(f"[IGNORE] Mensagem normal em grupo")
-                return
-
-        # ==================================================
-        # 7. SALVAR + EXTRAIR MEMÓRIA + IA - CORRIGIDO
-        # ==================================================
-        try: 
-            save_message(user_id, chat_id, chat_type, chat_title, "user", user_text)
-        except Exception as e: 
-            logging.error(f"[SAVE MESSAGE ERROR] {e}")
-
-        # Só extrai se for info importante. Não salva conversa normal
-        try: 
-            extrair_dados_automaticos(user_id, user_text)
-        except Exception as e: 
-            logging.error(f"[EXTRAIR ERROR] {e}")
-
-        contexto = montar_contexto(user_id, chat_id, chat_type, chat_title)
-        
-        # INJETAR MEMÓRIA NO PROMPT ANTES DE CHAMAR A IA
-        dados_usuario = buscar_dados_usuario(user_id)
-        if dados_usuario.get("memories"):
-            memoria_str = "\n".join([f"- {k}: {v}" for k, v in dados_usuario["memories"].items()])
-            contexto["prompt"] += f"\n\nIMPORTANTE: Use essas informações sobre o usuário para responder. Não pergunte de novo:\n{memoria_str}"
-
-        resposta = call_ai_smart(user_text, contexto, "conversa")
-        enviar_resposta(chat_id, resposta, message_id, send_message)
+        # ENVIAR RESPOSTA
+        send_message(chat_id, resposta, reply_to=message_id)
 
     except Exception as e:
         logging.exception(f"[PROCESS ERROR] {e}")
 
-# ==========================================================
-# WEBHOOK + HEALTH
-# ==========================================================
-
-@app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
+# ========================================
+# === WEBHOOK FLASK ======================
+# ========================================
+@app.route(f'/{TELEGRAM_TOKEN}', methods=['POST'])
 def webhook():
-    data = request.get_json(silent=True)
+    data = request.get_json()
     if not data: return "ok"
-    return processar_webhook(data, process_message)
 
-@app.route("/health")
-def health():
-    return "ok", 200
+    update_id = data.get("update_id")
+    if update_id in PROCESSED_UPDATES: return "ok"
+    PROCESSED_UPDATES.add(update_id)
+    if len(PROCESSED_UPDATES) > 1000: PROCESSED_UPDATES.clear()
 
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", "8080"))
-    app.run(host="0.0.0.0", port=port)
+    msg = data.get("message")
+    if not msg: return "ok"
+
+    # Processa em thread pra webhook não travar
+    executor.submit(processar_mensagem, msg)
+    return "ok"
+
+@app.route('/health')
+def health(): return "ok", 200
+
+if __name__ == '__main__':
+    init_bot_info()
+    app.run(host='0.0.0.0', port=8080)
