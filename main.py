@@ -4,6 +4,8 @@ import threading
 import time
 import logging
 import base64
+from datetime import datetime
+import pytz # NOVO
 from collections import defaultdict, deque
 from flask import Flask, request
 from concurrent.futures import ThreadPoolExecutor
@@ -18,6 +20,7 @@ BOT_NAME = "Matheus"
 CREATOR = "Kleber"
 CREATOR_ID = "8398287578" # SEU ID
 ADMINS = ["8398287578"]
+TIMEZONE = "America/Fortaleza" # Sobral/CE
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
@@ -101,6 +104,23 @@ def check_cooldown(user_id):
         if agora - USER_COOLDOWN.get(user_id, 0) < COOLDOWN_SEGUNDOS: return False
         USER_COOLDOWN[user_id] = agora
     return True
+
+# ========================================
+# DATA E HORA
+# ========================================
+def get_datetime_info():
+    tz = pytz.timezone(TIMEZONE)
+    agora = datetime.now(tz)
+    dias_semana = ["segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"]
+    dia_semana = dias_semana[agora.weekday()]
+    data_formatada = agora.strftime("%d/%m/%Y")
+    hora_formatada = agora.strftime("%H:%M")
+    return {
+        "dia_semana": dia_semana,
+        "data": data_formatada,
+        "hora": hora_formatada,
+        "datetime_full": agora.strftime("%d/%m/%Y %H:%M")
+    }
 
 # ========================================
 # OPENROUTER COM IMAGEM
