@@ -4,6 +4,10 @@ import threading
 import time
 import logging
 import base64
+import re
+import hashlib
+import json
+import random
 from datetime import datetime
 import pytz
 from collections import defaultdict, deque
@@ -14,7 +18,7 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 
 # ========================================
-# CONFIGURAÇÃO
+# CONFIGURAÇÃO - SEU ORIGINAL, NÃO MEXI
 # ========================================
 BOT_NAME = "Matheus"
 CREATOR = "Kleber"
@@ -30,16 +34,138 @@ if not TELEGRAM_TOKEN: raise RuntimeError("TELEGRAM_TOKEN não configurado")
 if not OPENROUTER_API_KEY: raise RuntimeError("OPENROUTER_API_KEY não configurada")
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 BOT_ID = None
 BOT_USERNAME = None
 BOT_INICIADO = False
 
-MODELO = "openrouter/free"
+# ========================================
+# NOVO - MOTOR V4.3.4 DO HANSEL
+# ========================================
+PROVIDERS = {
+    "groq": {"key": os.getenv("GROQ_API_KEY"), "model_env": os.getenv("GROQ_MODEL"), "endpoint": "https://api.groq.com/openai/v1", "discover_url": "https://api.groq.com/openai/v1/models", "models_fallback": ["llama-3.3-70b-versatile"], "format": "openai"},
+    "gemini": {"key": os.getenv("GEMINI_API_KEY"), "model_env": os.getenv("GEMINI_MODEL"), "endpoint": "https://generativelanguage.googleapis.com/v1beta", "discover_url": "https://generativelanguage.googleapis.com/v1beta/models", "models_fallback": ["gemini-1.5-flash"], "format": "gemini"},
+    "cerebras": {"key": os.getenv("CEREBRAS_API_KEY"), "model_env": os.getenv("CEREBRAS_MODEL"), "endpoint": "https://api.cerebras.ai/v1", "discover_url": None, "models_fallback": ["llama-3.3-70b"], "format": "openai"},
+    "openrouter": {"key": OPENROUTER_API_KEY, "model_env": os.getenv("OPENROUTER_MODEL"), "endpoint": "https://openrouter.ai/api/v1", "discover_url": "https://openrouter.ai/api/v1/models", "models_fallback": ["meta-llama/llama-3.1-70b-instruct", "openrouter/free"], "format": "openai"},
+    "mistral": {"key": os.getenv("MISTRAL_API_KEY"), "model_env": os.getenv("MISTRAL_MODEL"), "endpoint": "https://api.mistral.ai/v1", "discover_url": "https://api.mistral.ai/v1/models", "models_fallback": ["mistral-large-latest"], "format": "openai"},
+    "cloudflare": {"key": os.getenv("CLOUDFLARE_API_TOKEN"), "model_env": os.getenv("CLOUDFLARE_MODEL"), "endpoint": "https://api.cloudflare.com/client/v4/accounts/", "discover_url": None, "models_fallback": ["@cf/meta/llama-3.1-8b-instruct"], "format": "cloudflare"}
+}
+
+AI_BLACKLIST = {}
+AI_STATS = {"fallbacks": 0, "modelos_falhos": {}}
+ai_lock = threading.Lock()
+for prov in PROVIDERS.keys(): AI_STATS[prov] = {"ok": 0, "erro": 0, "429": 0, "401": 0, "404": 0, "5xx": 0}
+MODEL_CACHE = {}; MODEL_CACHE_TIME = {}
+
+thread_local = threading.local()
+def get_session():
+    if not hasattr(thread_local, "session"): thread_local.session = requests.Session()
+    return thread_local.session
+
+def _is_blacklisted(key):
+    with ai_lock: return AI_BLACKLIST.get(key, 0) > time.time()
+def _blacklist(key, seconds):
+    with ai_lock: AI_BLACKLIST[key] = time.time() + seconds
+def get_active_providers(): return [p for p, data in PROVIDERS.items() if data["key"]]
+
+def limpar_resposta_ia(resp):
+    if not resp: return None
+    resp = str(resp).strip()
+    resp = re.sub(r"<thinking>.*?</thinking>", "", resp, flags=re.DOTALL | re.IGNORECASE)
+    resp = re.sub(r"</?think(?:ing)?>", "", resp, flags=re.IGNORECASE)
+    resp = re.sub(r"^\s*(thinking|raciocínio|reasoning|análise)\s*:\s*", "", resp, flags=re.IGNORECASE)
+    marcadores = ["Resposta final:", "Resposta:", "Final:", "Answer:"]
+    for marcador in marcadores:
+        if marcador.lower() in resp.lower():
+            partes = re.split(re.escape(marcador), resp, maxsplit=1, flags=re.IGNORECASE)
+            if len(partes) == 2: resp = partes[1].strip(); break
+    resp = re.sub(r"```(?:text|markdown)?", "", resp, flags=re.IGNORECASE).replace("```", "")
+    resp = re.sub(r"\n{3,}", "\n\n", resp).strip()
+    return resp or None
+
+def discover_models(provider_name, data):
+    if not data["key"]: return []
+    if data["model_env"]: return [data["model_env"]]
+    if not data.get("discover_url"): return data.get("models_fallback", [])
+    cache_key = provider_name
+    if cache_key in MODEL_CACHE and time.time() - MODEL_CACHE_TIME.get(cache_key, 0) < 600: return MODEL_CACHE[cache_key]
+    s = get_session()
+    try:
+        headers = {"Authorization": f"Bearer {data['key']}"}
+        url = data["discover_url"]
+        if provider_name == "gemini": url += f"?key={data['key']}"; headers = {}
+        r = s.get(url, headers=headers, timeout=10)
+        if r.status_code == 200:
+            models = []
+            if provider_name in ["groq", "openrouter", "mistral"]: models = [m["id"] for m in r.json()["data"]]
+            elif provider_name == "gemini": models = [m["name"].replace("models/", "") for m in r.json()["models"]]
+            MODEL_CACHE[cache_key] = models; MODEL_CACHE_TIME[cache_key] = time.time()
+            return models
+    except Exception as e: logging.error(f"[DISCOVER ERROR] {provider_name}: {e}")
+    return data.get("models_fallback", [])
+
+def call_provider(provider_name, messages):
+    data = PROVIDERS[provider_name]
+    if not data["key"]: return None, "no_key"
+    modelos_tentativa = [data["model_env"]] if data["model_env"] else data.get("models_fallback", [])[:1]
+
+    for modelo in modelos_tentativa:
+        model_key = f"{provider_name}_{modelo}"
+        if _is_blacklisted(model_key) or _is_blacklisted(provider_name): continue
+        s = get_session()
+        try:
+            headers = {"Authorization": f"Bearer {data['key']}", "Content-Type": "application/json", "HTTP-Referer": RENDER_URL, "X-Title": BOT_NAME}
+            if data["format"] == "cloudflare":
+                account_id = os.getenv('CLOUDFLARE_ACCOUNT_ID')
+                if not account_id: _blacklist(provider_name, 3600); return None, "config_error"
+                prompt = "\n".join([f"{m['role']}: {m['content'] if isinstance(m['content'], str) else m['content'][0]['text']}" for m in messages]); payload = {"prompt": prompt, "max_tokens": 300}
+                url = data["endpoint"] + account_id + "/ai/run/" + modelo
+            elif data["format"] == "gemini":
+                contents = []
+                for m in messages:
+                    role = "user" if m["role"] in ["user","system"] else "model"
+                    # Suporte a imagem do seu bot original
+                    if isinstance(m["content"], list): text = m["content"][0]["text"]
+                    else: text = m["content"]
+                    contents.append({"role": role, "parts": [{"text": text}]})
+                payload = {"contents": contents}; url = f"{data['endpoint']}/{modelo}:generateContent?key={data['key']}"; headers = {"Content-Type": "application/json"}
+            else:
+                payload = {"model": modelo, "messages": messages, "max_tokens": 300}; url = data["endpoint"] + "/chat/completions"
+
+            r = s.post(url, headers=headers, json=payload, timeout=45)
+            if r.status_code == 200:
+                with ai_lock: AI_STATS[provider_name]["ok"] += 1
+                if data["format"] == "cloudflare": resp = r.json().get("result", {}).get("response", "")
+                elif data["format"] == "gemini": resp = r.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                else: resp = r.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+                resp = limpar_resposta_ia(resp)
+                if not resp: continue
+                return resp, "ok"
+
+            if r.status_code in [404, 410]: _blacklist(model_key, 3600); AI_STATS[provider_name]["404"] += 1
+            elif r.status_code in [401, 403]: _blacklist(provider_name, 3600); AI_STATS[provider_name]["401"] += 1
+            elif r.status_code == 429: _blacklist(provider_name, 60); AI_STATS[provider_name]["429"] += 1
+            elif r.status_code >= 500: _blacklist(provider_name, 30); AI_STATS[provider_name]["5xx"] += 1
+            else: AI_STATS[provider_name]["erro"] += 1
+        except Exception as e: AI_STATS[provider_name]["erro"] += 1; logging.error(f"[PROVIDER ERROR] {provider_name}/{modelo}: {e}")
+    return None, "all_models_failed"
+
+def call_ai_router(messages):
+    provedores = get_active_providers()
+    if not provedores: return "⚠️ Nenhuma chave de IA configurada.", 0, "no_keys"
+    prov_principal = provedores[0]
+    for prov in provedores:
+        resp, status = call_provider(prov, messages)
+        if resp:
+            if prov!= prov_principal:
+                with ai_lock: AI_STATS["fallbacks"] += 1
+                logging.info(f"[FALLBACK] Usando {prov} em vez de {prov_principal}")
+            return resp, 0, prov
+        logging.warning(f"[PROVIDER FAIL] {prov}: {status}")
+    return "⚠️ IA offline agora. Tenta em 1 min.", 0, "error"
 
 # ========================================
-# LIMITES
+# SEU ORIGINAL - LIMITES E MEMÓRIA
 # ========================================
 MAX_TOKENS_RESPOSTA = 300
 HISTORICO_LIMITE_USER = 6
@@ -52,9 +178,6 @@ MAX_REQUISICOES_POR_MINUTO = 5
 JANELA_TEMPO = 60
 MAX_REQUISICOES_POR_USER_HORA = 10
 
-# ========================================
-# MEMÓRIA
-# ========================================
 HISTORICO = defaultdict(lambda: deque(maxlen=HISTORICO_LIMITE_USER))
 HISTORICO_GRUPO = defaultdict(lambda: deque(maxlen=HISTORICO_LIMITE_GRUPO))
 USER_COOLDOWN = {}
@@ -66,7 +189,7 @@ executor = ThreadPoolExecutor(max_workers=3)
 REQUISICOES_TIMES = deque()
 
 # ========================================
-# FUNÇÕES AUXILIARES
+# FUNÇÕES AUXILIARES - ORIGINAIS
 # ========================================
 def init_bot_info():
     global BOT_ID, BOT_USERNAME, BOT_INICIADO
@@ -78,7 +201,7 @@ def init_bot_info():
         BOT_ID = data["id"]
         BOT_USERNAME = data["username"].lower()
         BOT_INICIADO = True
-        logging.info(f"[BOT] Iniciado como @{BOT_USERNAME} | ID: {BOT_ID}")
+        logging.info(f"[BOT] Iniciado como @{BOT_USERNAME} | ID: {BOT_ID} | Motor V4.3.4")
     except Exception as e:
         logging.exception(f"[TELEGRAM ERROR] Falha ao iniciar bot: {e}")
 
@@ -181,9 +304,6 @@ def deve_responder(msg, chat_type):
     if "photo" in msg: return True
     return False
 
-# ========================================
-# COMANDOS
-# ========================================
 def processar_comando(texto, chat_id, user_info, is_group):
     texto = texto.lower()
     if texto == "/start": return f"👋 Opa {user_info['nome']}! Eu sou o *{BOT_NAME}*\nUse `/ajuda`"
@@ -191,7 +311,9 @@ def processar_comando(texto, chat_id, user_info, is_group):
     if texto == "/limpar":
         limpar_historico(chat_id, user_info["id"], is_group)
         return "🧹 Histórico limpo!"
-    if texto == "/status": return f"✅ *{BOT_NAME} Online*\n👤 Users: {len(HISTORICO)}\n👥 Grupos: {len(HISTORICO_GRUPO)}"
+    if texto == "/status":
+        ativos = len(get_active_providers())
+        return f"✅ *{BOT_NAME} Online V4.3.4*\n🤖 Provedores ativos: {ativos}\n👤 Users: {len(HISTORICO)}\n👥 Grupos: {len(HISTORICO_GRUPO)}\n🔄 Fallbacks: {AI_STATS['fallbacks']}"
     if texto == "/hora":
         dt = get_datetime_info()
         return f"📅 {dt['dia_semana']}, {dt['data']}\n🕐 {dt['hora']} Sobral/CE"
@@ -200,26 +322,7 @@ def processar_comando(texto, chat_id, user_info, is_group):
     return None
 
 # ========================================
-# OPENROUTER
-# ========================================
-def call_openrouter(messages):
-    if not check_global_rate_limit():
-        return "⏳ Limite global atingido. Espera 1 min.", 0, "rate_limit"
-    try:
-        headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json", "HTTP-Referer": RENDER_URL, "X-Title": BOT_NAME}
-        payload = {"model": MODELO, "messages": messages, "max_tokens": MAX_TOKENS_RESPOSTA}
-        r = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=TIMEOUT_API)
-        if r.status_code == 200:
-            return r.json().get("choices", [{}])[0].get("message", {}).get("content"), round(r.elapsed.total_seconds(), 2), MODELO
-        if r.status_code == 429:
-            return "⚠️ Cota da IA acabou por hoje. Volta amanhã.", 0, "quota"
-        logging.error(f"[OPENROUTER] {r.status_code}: {r.text}")
-    except Exception as e:
-        logging.exception(f"[OPENROUTER ERROR]: {e}")
-    return "⚠️ IA offline agora. Tenta em 1 min.", 0, "error"
-
-# ========================================
-# PROCESSAMENTO
+# PROCESSAMENTO - AGORA USANDO ROUTER V4.3.4
 # ========================================
 def processar_mensagem(msg):
     try:
@@ -240,6 +343,9 @@ def processar_mensagem(msg):
         if not check_user_rate_limit(user_info["id"]):
             send_message(chat_id, "⏳ Você atingiu o limite de 10 msgs/hora. Espera um pouco.", reply_to=message_id)
             return
+        if not check_global_rate_limit():
+            send_message(chat_id, "⏳ Limite global atingido. Espera 1 min.", reply_to=message_id)
+            return
 
         if has_media:
             file_id = msg["photo"][-1]["file_id"]
@@ -250,7 +356,7 @@ def processar_mensagem(msg):
             messages = [{"role": "system", "content": system}] + historico
             messages.append({"role": "user", "content": [{"type": "text", "text": texto}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}]})
             adicionar_historico(chat_id, user_info["id"], "user", f"[IMAGEM] {texto}", is_group)
-            resposta, tempo_ia, _ = call_openrouter(messages)
+            resposta, _, _ = call_ai_router(messages)
             adicionar_historico(chat_id, user_info["id"], "assistant", resposta, is_group)
             send_message(chat_id, resposta, reply_to=message_id)
             return
@@ -260,16 +366,13 @@ def processar_mensagem(msg):
         system = montar_system_prompt(user_info)
         messages = [{"role": "system", "content": system}] + historico + [{"role": "user", "content": texto}]
         adicionar_historico(chat_id, user_info["id"], "user", texto, is_group)
-        resposta, tempo_ia, _ = call_openrouter(messages)
+        resposta, _, _ = call_ai_router(messages)
         adicionar_historico(chat_id, user_info["id"], "assistant", resposta, is_group)
         send_message(chat_id, resposta, reply_to=message_id)
 
     except Exception as e:
         logging.exception(f"[PROCESS ERROR] {e}")
 
-# ========================================
-# WEBHOOK
-# ========================================
 @app.route(f'/{TELEGRAM_TOKEN}', methods=['POST'])
 def webhook():
     if not BOT_INICIADO: init_bot_info()
@@ -282,14 +385,13 @@ def webhook():
     return "ok"
 
 @app.route('/')
-def index(): return f"{BOT_NAME} online ✅", 200
+def index(): return f"{BOT_NAME} online V4.3.4 ✅", 200
 
 @app.route('/health')
 def health():
     if not BOT_INICIADO: init_bot_info()
     return "ok", 200
 
-# TIREI O init_bot_info() DAQUI PRA GUNICORN NÃO QUEBRAR
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
