@@ -361,7 +361,7 @@ def debug_route():
     ativos = {k: "OK" if v["key"] else "SEM CHAVE" for k,v in PROVIDERS.items()}
     return {"provedores": ativos, "stats": AI_STATS, "blacklist": AI_BLACKLIST}
 
-@@app.route('/test_groq')
+@app.route('/test_groq')
 def test_groq():
     import requests
     key = os.getenv("GROQ_API_KEY")
