@@ -73,74 +73,95 @@ def limpar_resposta_ia(resp):
         if marcador.lower() in resp.lower():
             partes = re.split(re.escape(marcador), resp, maxsplit=1, flags=re.IGNORECASE)
             if len(partes) == 2: resp = partes[1].strip(); break
-    resp = re.sub(r"```(?:text|markdown)?", "", resp, flags=re.IGNORECASE).replace("```", "")
-    resp = re.sub(r"\n{3,}", "\n\n", resp).strip()
-    return resp or None
+import os, requests, threading, time, logging, base64, re
+from datetime import datetime
+import pytz
+from collections import defaultdict, deque
+from flask import Flask, request
+from concurrent.futures import ThreadPoolExecutor
+
+app = Flask(__name__)
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
+
+BOT_NAME = "Matheus"
+CREATOR_ID = "8398287578"
+TIMEZONE = "America/Fortaleza"
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+RENDER_URL = "https://edu-bot-6yfa.onrender.com"
+
+if not TELEGRAM_TOKEN: raise RuntimeError("TELEGRAM_TOKEN não configurado")
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+
+PROVIDERS = {
+    "groq": {"key": os.getenv("GROQ_API_KEY"), "model_env": os.getenv("GROQ_MODEL", "openai/gpt-oss-20b"), "endpoint": "https://api.groq.com/openai/v1", "models_fallback": ["openai/gpt-oss-20b", "meta-llama/llama-4-scout-17b-16e-instruct", "llama-3.1-8b-instant"], "format": "openai"},
+    "openrouter": {"key": os.getenv("OPENROUTER_API_KEY"), "model_env": os.getenv("OPENROUTER_MODEL"), "endpoint": "https://openrouter.ai/api/v1", "models_fallback": ["meta-llama/llama-3.1-8b-instruct:free"], "format": "openai"},
+}
+# Filtra só quem tem chave
+PROVIDERS = {k:v for k,v in PROVIDERS.items() if v["key"]}
+
+AI_BLACKLIST = {}
+AI_STATS = {"fallbacks": 0}
+ai_lock = threading.Lock()
+thread_local = threading.local()
+def get_session():
+    if not hasattr(thread_local, "session"): thread_local.session = requests.Session()
+    return thread_local.session
+
+def _is_blacklisted(key):
+    with ai_lock: return AI_BLACKLIST.get(key, 0) > time.time()
+def _blacklist(key, seconds):
+    with ai_lock: AI_BLACKLIST[key] = time.time() + seconds
+def get_active_providers(): return list(PROVIDERS.keys())
+
+def limpar_resposta_ia(resp):
+    if not resp: return None
+    resp = re.sub(r"<thinking>.*?</thinking>", "", str(resp), flags=re.DOTALL | re.IGNORECASE)
+    resp = re.sub(r"</?think(?:ing)?>", "", resp, flags=re.IGNORECASE)
+    return resp.strip()[:4000] or None
 
 def call_provider(provider_name, messages):
     data = PROVIDERS[provider_name]
-    if not data["key"]: return None, "no_key"
-    modelos_tentativa = [data["model_env"]] if data["model_env"] else data.get("models_fallback", [])
-
-    for modelo in modelos_tentativa:
-        if not modelo: continue
-        model_key = f"{provider_name}_{modelo}"
-        if _is_blacklisted(model_key) or _is_blacklisted(provider_name): continue
+    modelos = [data["model_env"]] + data.get("models_fallback", []) if data["model_env"] else data.get("models_fallback", [])
+    for modelo in modelos:
+        if not modelo or _is_blacklisted(f"{provider_name}_{modelo}"): continue
         s = get_session()
         try:
-            headers = {"Authorization": f"Bearer {data['key']}", "Content-Type": "application/json", "HTTP-Referer": RENDER_URL, "X-Title": BOT_NAME}
-            if data["format"] == "gemini":
-                contents = []
-                for m in messages:
-                    role = "user" if m["role"] in ["user","system"] else "model"
-                    text = m["content"][0]["text"] if isinstance(m["content"], list) else m["content"]
-                    contents.append({"role": role, "parts": [{"text": text}]})
-                payload = {"contents": contents}; url = f"{data['endpoint']}/models/{modelo}:generateContent?key={data['key']}"; headers = {"Content-Type": "application/json"}
-            else:
-                # openai format - remove imagem se for groq/cerebras que não aceita
-                msgs_limpa = []
-                for m in messages:
-                    if isinstance(m["content"], list):
-                        txt = m["content"][0].get("text","")
-                        msgs_limpa.append({"role": m["role"], "content": txt})
-                    else:
-                        msgs_limpa.append(m)
-                payload = {"model": modelo, "messages": msgs_limpa, "max_tokens": 300}; url = data["endpoint"] + "/chat/completions"
-
+            msgs_limpa = []
+            for m in messages:
+                if isinstance(m["content"], list): msgs_limpa.append({"role": m["role"], "content": m["content"][0].get("text","")})
+                else: msgs_limpa.append(m)
+            payload = {"model": modelo, "messages": msgs_limpa, "max_tokens": 1024, "temperature": 0.7}
+            url = data["endpoint"] + "/chat/completions"
+            headers = {"Authorization": f"Bearer {data['key']}", "Content-Type": "application/json"}
             r = s.post(url, headers=headers, json=payload, timeout=45)
             if r.status_code == 200:
-                with ai_lock: AI_STATS[provider_name]["ok"] += 1
-                if data["format"] == "gemini": resp = r.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                else: resp = r.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+                j = r.json()
+                choice = j.get("choices", [{}])[0]
+                resp = choice.get("message", {}).get("content", "") or choice.get("text", "")
+                # alguns modelos gpt-oss retornam reasoning separado
+                if not resp and "reasoning" in choice.get("message", {}):
+                    resp = j.get("choices", [{}])[0].get("message", {}).get("reasoning","")
                 resp = limpar_resposta_ia(resp)
-                if not resp: continue
-                logging.info(f"[AI OK] {provider_name}/{modelo}")
-                return resp, "ok"
-
-            # LOG REAL DO ERRO
-            logging.warning(f"[PROVIDER FAIL] {provider_name}/{modelo} -> {r.status_code} {r.text[:300]}")
-
-            if r.status_code in [404, 410]: _blacklist(model_key, 3600); AI_STATS[provider_name]["404"] += 1
-            elif r.status_code in [401, 403]: _blacklist(provider_name, 3600); AI_STATS[provider_name]["401"] += 1; logging.error(f"CHAVE INVALIDA {provider_name}")
-            elif r.status_code == 429: _blacklist(provider_name, 60); AI_STATS[provider_name]["429"] += 1
-            elif r.status_code >= 500: _blacklist(provider_name, 30); AI_STATS[provider_name]["5xx"] += 1
-            else: AI_STATS[provider_name]["erro"] += 1
-        except Exception as e: AI_STATS[provider_name]["erro"] += 1; logging.error(f"[PROVIDER ERROR] {provider_name}/{modelo}: {e}")
-    return None, "all_models_failed"
+                if resp:
+                    logging.info(f"[AI OK] {provider_name}/{modelo}")
+                    return resp, "ok"
+            logging.warning(f"[FAIL] {provider_name}/{modelo} {r.status_code} {r.text[:400]}")
+            if r.status_code in [404, 410]: _blacklist(f"{provider_name}_{modelo}", 3600)
+            elif r.status_code in [401, 403]: _blacklist(provider_name, 3600)
+            elif r.status_code == 429: _blacklist(provider_name, 60)
+        except Exception as e:
+            logging.error(f"[ERROR] {provider_name}/{modelo}: {e}")
+    return None, "fail"
 
 def call_ai_router(messages):
-    provedores = get_active_providers()
-    if not provedores: return "⚠️ Nenhuma chave de IA configurada.", 0, "no_keys"
-    prov_principal = provedores[0]
-    for prov in provedores:
+    provs = get_active_providers()
+    if not provs: return "⚠️ Sem chave de IA configurada no Render.", 0, "no_keys"
+    for prov in provs:
         resp, status = call_provider(prov, messages)
-        if resp:
-            if prov!= prov_principal:
-                with ai_lock: AI_STATS["fallbacks"] += 1
-                logging.info(f"[FALLBACK] Usando {prov} em vez de {prov_principal}")
-            return resp, 0, prov
-        logging.warning(f"[PROVIDER FAIL] {prov}: {status}")
+        if resp: return resp, 0, prov
     return "⚠️ IA offline agora. Tenta em 1 min.", 0, "error"
+
+#... mantém o resto do seu código igual (HISTORICO, send_message etc)...
 
 MAX_TOKENS_RESPOSTA = 300
 HISTORICO_LIMITE_USER = 6
