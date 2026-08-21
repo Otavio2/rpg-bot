@@ -366,6 +366,20 @@ def health():
     if not BOT_INICIADO: init_bot_info()
     return "ok", 200
 
+@app.route('/test_groq')
+def test_groq():
+    import requests
+    key = os.getenv("GROQ_API_KEY")
+    if not key:
+        return "SEM CHAVE GROQ configurada no Render"
+    headers = {"Authorization": f"Bearer {key}"}
+    payload = {"model": "llama3-8b-8192", "messages": [{"role": "user", "content": "Oi"}], "max_tokens": 20}
+    try:
+        r = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers, timeout=20)
+        return f"Status: {r.status_code}<br><br>Resposta:<br>{r.text[:1000]}", r.status_code
+    except Exception as e:
+        return f"Erro: {e}"
+
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
