@@ -361,22 +361,18 @@ def debug_route():
     ativos = {k: "OK" if v["key"] else "SEM CHAVE" for k,v in PROVIDERS.items()}
     return {"provedores": ativos, "stats": AI_STATS, "blacklist": AI_BLACKLIST}
 
-@app.route('/health')
-def health():
-    if not BOT_INICIADO: init_bot_info()
-    return "ok", 200
-
-@app.route('/test_groq')
+@@app.route('/test_groq')
 def test_groq():
     import requests
     key = os.getenv("GROQ_API_KEY")
+    model = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
     if not key:
-        return "SEM CHAVE GROQ configurada no Render"
+        return "SEM CHAVE GROQ"
     headers = {"Authorization": f"Bearer {key}"}
-    payload = {"model": "llama3-8b-8192", "messages": [{"role": "user", "content": "Oi"}], "max_tokens": 20}
+    payload = {"model": model, "messages": [{"role": "user", "content": "Oi"}], "max_tokens": 20}
     try:
         r = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers, timeout=20)
-        return f"Status: {r.status_code}<br><br>Resposta:<br>{r.text[:1000]}", r.status_code
+        return f"Model: {model}<br>Status: {r.status_code}<br><br>{r.text[:1000]}", r.status_code
     except Exception as e:
         return f"Erro: {e}"
 
