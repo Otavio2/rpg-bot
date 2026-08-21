@@ -17,9 +17,6 @@ from concurrent.futures import ThreadPoolExecutor
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 
-# ========================================
-# CONFIGURAÇÃO - SEU ORIGINAL, NÃO MEXI
-# ========================================
 BOT_NAME = "Matheus"
 CREATOR = "Kleber"
 CREATOR_ID = "8398287578"
@@ -39,16 +36,13 @@ BOT_ID = None
 BOT_USERNAME = None
 BOT_INICIADO = False
 
-# ========================================
-# NOVO - MOTOR V4.3.4 DO HANSEL
-# ========================================
+# ===== MOTOR V4.3.5 CORRIGIDO =====
 PROVIDERS = {
-    "groq": {"key": os.getenv("GROQ_API_KEY"), "model_env": os.getenv("GROQ_MODEL"), "endpoint": "https://api.groq.com/openai/v1", "discover_url": "https://api.groq.com/openai/v1/models", "models_fallback": ["llama-3.3-70b-versatile"], "format": "openai"},
-    "gemini": {"key": os.getenv("GEMINI_API_KEY"), "model_env": os.getenv("GEMINI_MODEL"), "endpoint": "https://generativelanguage.googleapis.com/v1beta", "discover_url": "https://generativelanguage.googleapis.com/v1beta/models", "models_fallback": ["gemini-1.5-flash"], "format": "gemini"},
-    "cerebras": {"key": os.getenv("CEREBRAS_API_KEY"), "model_env": os.getenv("CEREBRAS_MODEL"), "endpoint": "https://api.cerebras.ai/v1", "discover_url": None, "models_fallback": ["llama-3.3-70b"], "format": "openai"},
-    "openrouter": {"key": OPENROUTER_API_KEY, "model_env": os.getenv("OPENROUTER_MODEL"), "endpoint": "https://openrouter.ai/api/v1", "discover_url": "https://openrouter.ai/api/v1/models", "models_fallback": ["meta-llama/llama-3.1-70b-instruct", "openrouter/free"], "format": "openai"},
-    "mistral": {"key": os.getenv("MISTRAL_API_KEY"), "model_env": os.getenv("MISTRAL_MODEL"), "endpoint": "https://api.mistral.ai/v1", "discover_url": "https://api.mistral.ai/v1/models", "models_fallback": ["mistral-large-latest"], "format": "openai"},
-    "cloudflare": {"key": os.getenv("CLOUDFLARE_API_TOKEN"), "model_env": os.getenv("CLOUDFLARE_MODEL"), "endpoint": "https://api.cloudflare.com/client/v4/accounts/", "discover_url": None, "models_fallback": ["@cf/meta/llama-3.1-8b-instruct"], "format": "cloudflare"}
+    "groq": {"key": os.getenv("GROQ_API_KEY"), "model_env": os.getenv("GROQ_MODEL"), "endpoint": "https://api.groq.com/openai/v1", "discover_url": "https://api.groq.com/openai/v1/models", "models_fallback": ["llama-3.1-8b-instant", "llama3-8b-8192"], "format": "openai"},
+    "gemini": {"key": os.getenv("GEMINI_API_KEY"), "model_env": os.getenv("GEMINI_MODEL"), "endpoint": "https://generativelanguage.googleapis.com/v1beta", "discover_url": "https://generativelanguage.googleapis.com/v1beta/models", "models_fallback": ["gemini-1.5-flash-8b", "gemini-1.5-flash"], "format": "gemini"},
+    "cerebras": {"key": os.getenv("CEREBRAS_API_KEY"), "model_env": os.getenv("CEREBRAS_MODEL"), "endpoint": "https://api.cerebras.ai/v1", "discover_url": None, "models_fallback": ["llama3.1-8b"], "format": "openai"},
+    "openrouter": {"key": OPENROUTER_API_KEY, "model_env": os.getenv("OPENROUTER_MODEL"), "endpoint": "https://openrouter.ai/api/v1", "discover_url": "https://openrouter.ai/api/v1/models", "models_fallback": ["meta-llama/llama-3.1-8b-instruct:free", "google/gemini-flash-1.5-8b:free", "mistralai/mistral-7b-instruct:free"], "format": "openai"},
+    "mistral": {"key": os.getenv("MISTRAL_API_KEY"), "model_env": os.getenv("MISTRAL_MODEL"), "endpoint": "https://api.mistral.ai/v1", "discover_url": "https://api.mistral.ai/v1/models", "models_fallback": ["mistral-small-latest"], "format": "openai"},
 }
 
 AI_BLACKLIST = {}
@@ -83,67 +77,51 @@ def limpar_resposta_ia(resp):
     resp = re.sub(r"\n{3,}", "\n\n", resp).strip()
     return resp or None
 
-def discover_models(provider_name, data):
-    if not data["key"]: return []
-    if data["model_env"]: return [data["model_env"]]
-    if not data.get("discover_url"): return data.get("models_fallback", [])
-    cache_key = provider_name
-    if cache_key in MODEL_CACHE and time.time() - MODEL_CACHE_TIME.get(cache_key, 0) < 600: return MODEL_CACHE[cache_key]
-    s = get_session()
-    try:
-        headers = {"Authorization": f"Bearer {data['key']}"}
-        url = data["discover_url"]
-        if provider_name == "gemini": url += f"?key={data['key']}"; headers = {}
-        r = s.get(url, headers=headers, timeout=10)
-        if r.status_code == 200:
-            models = []
-            if provider_name in ["groq", "openrouter", "mistral"]: models = [m["id"] for m in r.json()["data"]]
-            elif provider_name == "gemini": models = [m["name"].replace("models/", "") for m in r.json()["models"]]
-            MODEL_CACHE[cache_key] = models; MODEL_CACHE_TIME[cache_key] = time.time()
-            return models
-    except Exception as e: logging.error(f"[DISCOVER ERROR] {provider_name}: {e}")
-    return data.get("models_fallback", [])
-
 def call_provider(provider_name, messages):
     data = PROVIDERS[provider_name]
     if not data["key"]: return None, "no_key"
-    modelos_tentativa = [data["model_env"]] if data["model_env"] else data.get("models_fallback", [])[:1]
+    modelos_tentativa = [data["model_env"]] if data["model_env"] else data.get("models_fallback", [])
 
     for modelo in modelos_tentativa:
+        if not modelo: continue
         model_key = f"{provider_name}_{modelo}"
         if _is_blacklisted(model_key) or _is_blacklisted(provider_name): continue
         s = get_session()
         try:
             headers = {"Authorization": f"Bearer {data['key']}", "Content-Type": "application/json", "HTTP-Referer": RENDER_URL, "X-Title": BOT_NAME}
-            if data["format"] == "cloudflare":
-                account_id = os.getenv('CLOUDFLARE_ACCOUNT_ID')
-                if not account_id: _blacklist(provider_name, 3600); return None, "config_error"
-                prompt = "\n".join([f"{m['role']}: {m['content'] if isinstance(m['content'], str) else m['content'][0]['text']}" for m in messages]); payload = {"prompt": prompt, "max_tokens": 300}
-                url = data["endpoint"] + account_id + "/ai/run/" + modelo
-            elif data["format"] == "gemini":
+            if data["format"] == "gemini":
                 contents = []
                 for m in messages:
                     role = "user" if m["role"] in ["user","system"] else "model"
-                    # Suporte a imagem do seu bot original
-                    if isinstance(m["content"], list): text = m["content"][0]["text"]
-                    else: text = m["content"]
+                    text = m["content"][0]["text"] if isinstance(m["content"], list) else m["content"]
                     contents.append({"role": role, "parts": [{"text": text}]})
-                payload = {"contents": contents}; url = f"{data['endpoint']}/{modelo}:generateContent?key={data['key']}"; headers = {"Content-Type": "application/json"}
+                payload = {"contents": contents}; url = f"{data['endpoint']}/models/{modelo}:generateContent?key={data['key']}"; headers = {"Content-Type": "application/json"}
             else:
-                payload = {"model": modelo, "messages": messages, "max_tokens": 300}; url = data["endpoint"] + "/chat/completions"
+                # openai format - remove imagem se for groq/cerebras que não aceita
+                msgs_limpa = []
+                for m in messages:
+                    if isinstance(m["content"], list):
+                        txt = m["content"][0].get("text","")
+                        msgs_limpa.append({"role": m["role"], "content": txt})
+                    else:
+                        msgs_limpa.append(m)
+                payload = {"model": modelo, "messages": msgs_limpa, "max_tokens": 300}; url = data["endpoint"] + "/chat/completions"
 
             r = s.post(url, headers=headers, json=payload, timeout=45)
             if r.status_code == 200:
                 with ai_lock: AI_STATS[provider_name]["ok"] += 1
-                if data["format"] == "cloudflare": resp = r.json().get("result", {}).get("response", "")
-                elif data["format"] == "gemini": resp = r.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                if data["format"] == "gemini": resp = r.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
                 else: resp = r.json().get("choices", [{}])[0].get("message", {}).get("content", "")
                 resp = limpar_resposta_ia(resp)
                 if not resp: continue
+                logging.info(f"[AI OK] {provider_name}/{modelo}")
                 return resp, "ok"
 
+            # LOG REAL DO ERRO
+            logging.warning(f"[PROVIDER FAIL] {provider_name}/{modelo} -> {r.status_code} {r.text[:300]}")
+
             if r.status_code in [404, 410]: _blacklist(model_key, 3600); AI_STATS[provider_name]["404"] += 1
-            elif r.status_code in [401, 403]: _blacklist(provider_name, 3600); AI_STATS[provider_name]["401"] += 1
+            elif r.status_code in [401, 403]: _blacklist(provider_name, 3600); AI_STATS[provider_name]["401"] += 1; logging.error(f"CHAVE INVALIDA {provider_name}")
             elif r.status_code == 429: _blacklist(provider_name, 60); AI_STATS[provider_name]["429"] += 1
             elif r.status_code >= 500: _blacklist(provider_name, 30); AI_STATS[provider_name]["5xx"] += 1
             else: AI_STATS[provider_name]["erro"] += 1
@@ -164,9 +142,6 @@ def call_ai_router(messages):
         logging.warning(f"[PROVIDER FAIL] {prov}: {status}")
     return "⚠️ IA offline agora. Tenta em 1 min.", 0, "error"
 
-# ========================================
-# SEU ORIGINAL - LIMITES E MEMÓRIA
-# ========================================
 MAX_TOKENS_RESPOSTA = 300
 HISTORICO_LIMITE_USER = 6
 HISTORICO_LIMITE_GRUPO = 4
@@ -188,9 +163,6 @@ UPDATE_EXPIRACAO = 3600
 executor = ThreadPoolExecutor(max_workers=3)
 REQUISICOES_TIMES = deque()
 
-# ========================================
-# FUNÇÕES AUXILIARES - ORIGINAIS
-# ========================================
 def init_bot_info():
     global BOT_ID, BOT_USERNAME, BOT_INICIADO
     if BOT_INICIADO: return
@@ -201,7 +173,7 @@ def init_bot_info():
         BOT_ID = data["id"]
         BOT_USERNAME = data["username"].lower()
         BOT_INICIADO = True
-        logging.info(f"[BOT] Iniciado como @{BOT_USERNAME} | ID: {BOT_ID} | Motor V4.3.4")
+        logging.info(f"[BOT] Iniciado como @{BOT_USERNAME} | ID: {BOT_ID} | Motor V4.3.5")
     except Exception as e:
         logging.exception(f"[TELEGRAM ERROR] Falha ao iniciar bot: {e}")
 
@@ -313,7 +285,7 @@ def processar_comando(texto, chat_id, user_info, is_group):
         return "🧹 Histórico limpo!"
     if texto == "/status":
         ativos = len(get_active_providers())
-        return f"✅ *{BOT_NAME} Online V4.3.4*\n🤖 Provedores ativos: {ativos}\n👤 Users: {len(HISTORICO)}\n👥 Grupos: {len(HISTORICO_GRUPO)}\n🔄 Fallbacks: {AI_STATS['fallbacks']}"
+        return f"✅ *{BOT_NAME} Online V4.3.5*\n🤖 Provedores ativos: {ativos}\n👤 Users: {len(HISTORICO)}\n👥 Grupos: {len(HISTORICO_GRUPO)}\n🔄 Fallbacks: {AI_STATS['fallbacks']}"
     if texto == "/hora":
         dt = get_datetime_info()
         return f"📅 {dt['dia_semana']}, {dt['data']}\n🕐 {dt['hora']} Sobral/CE"
@@ -321,9 +293,6 @@ def processar_comando(texto, chat_id, user_info, is_group):
         return f"*PAINEL*\nUsers: {len(HISTORICO)}\nGrupos: {len(HISTORICO_GRUPO)}"
     return None
 
-# ========================================
-# PROCESSAMENTO - AGORA USANDO ROUTER V4.3.4
-# ========================================
 def processar_mensagem(msg):
     try:
         chat = msg["chat"]; chat_id = chat["id"]; chat_type = chat["type"]
@@ -385,7 +354,12 @@ def webhook():
     return "ok"
 
 @app.route('/')
-def index(): return f"{BOT_NAME} online V4.3.4 ✅", 200
+def index(): return f"{BOT_NAME} online V4.3.5 ✅", 200
+
+@app.route('/debug')
+def debug_route():
+    ativos = {k: "OK" if v["key"] else "SEM CHAVE" for k,v in PROVIDERS.items()}
+    return {"provedores": ativos, "stats": AI_STATS, "blacklist": AI_BLACKLIST}
 
 @app.route('/health')
 def health():
