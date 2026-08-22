@@ -424,6 +424,25 @@ def debug_route():
     ativos = {k: "OK" if v["key"] else "SEM CHAVE" for k,v in PROVIDERS.items()}
     return {"provedores": ativos, "stats": AI_STATS, "blacklist": AI_BLACKLIST}
 
+@app.route('/test_cloudflare')
+def test_cloudflare():
+    import requests
+    token = os.getenv("CLOUDFLARE_API_TOKEN")
+    account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID")
+    model = os.getenv("CLOUDFLARE_MODEL", "@cf/meta/llama-3.1-8b-instruct")
+    if not token or not account_id:
+        return f"SEM TOKEN: token={bool(token)} account={bool(account_id)}"
+    
+    url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
+    headers = {"Authorization": f"Bearer {token}"}
+    payload = {"messages": [{"role": "user", "content": "Oi, diga apenas OK"}]}
+    
+    try:
+        r = requests.post(url, json=payload, headers=headers, timeout=30)
+        return f"Model: {model}<br>URL: {url}<br>Status: {r.status_code}<br><br>{r.text[:1500]}", r.status_code
+    except Exception as e:
+        return f"Erro Cloudflare: {e}"
+
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
