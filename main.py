@@ -38,13 +38,55 @@ BOT_INICIADO = False
 
 # ===== MOTOR V4.3.5 CORRIGIDO =====
 PROVIDERS = {
-    "groq": {"key": os.getenv("GROQ_API_KEY"), "model_env": os.getenv("GROQ_MODEL"), "endpoint": "https://api.groq.com/openai/v1", "discover_url": "https://api.groq.com/openai/v1/models", "models_fallback": ["llama-3.1-8b-instant", "llama3-8b-8192"], "format": "openai"},
-    "gemini": {"key": os.getenv("GEMINI_API_KEY"), "model_env": os.getenv("GEMINI_MODEL"), "endpoint": "https://generativelanguage.googleapis.com/v1beta", "discover_url": "https://generativelanguage.googleapis.com/v1beta/models", "models_fallback": ["gemini-1.5-flash-8b", "gemini-1.5-flash"], "format": "gemini"},
-    "cerebras": {"key": os.getenv("CEREBRAS_API_KEY"), "model_env": os.getenv("CEREBRAS_MODEL"), "endpoint": "https://api.cerebras.ai/v1", "discover_url": None, "models_fallback": ["llama3.1-8b"], "format": "openai"},
-    "openrouter": {"key": OPENROUTER_API_KEY, "model_env": os.getenv("OPENROUTER_MODEL"), "endpoint": "https://openrouter.ai/api/v1", "discover_url": "https://openrouter.ai/api/v1/models", "models_fallback": ["meta-llama/llama-3.1-8b-instruct:free", "google/gemini-flash-1.5-8b:free", "mistralai/mistral-7b-instruct:free"], "format": "openai"},
-    "mistral": {"key": os.getenv("MISTRAL_API_KEY"), "model_env": os.getenv("MISTRAL_MODEL"), "endpoint": "https://api.mistral.ai/v1", "discover_url": "https://api.mistral.ai/v1/models", "models_fallback": ["mistral-small-latest"], "format": "openai"},
+    "groq": {
+        "key": os.getenv("GROQ_API_KEY"),
+        "model_env": os.getenv("GROQ_MODEL", "openai/gpt-oss-20b"),
+        "endpoint": "https://api.groq.com/openai/v1",
+        "discover_url": "https://api.groq.com/openai/v1/models",
+        "models_fallback": ["openai/gpt-oss-20b", "meta-llama/llama-4-scout-17b-16e-instruct", "llama-3.1-8b-instant"],
+        "format": "openai"
+    },
+    "gemini": {
+        "key": os.getenv("GEMINI_API_KEY"),
+        "model_env": os.getenv("GEMINI_MODEL"),
+        "endpoint": "https://generativelanguage.googleapis.com/v1beta",
+        "discover_url": "https://generativelanguage.googleapis.com/v1beta/models",
+        "models_fallback": ["gemini-2.0-flash", "gemini-1.5-flash-8b", "gemini-1.5-flash"],
+        "format": "gemini"
+    },
+    "cerebras": {
+        "key": os.getenv("CEREBRAS_API_KEY"),
+        "model_env": os.getenv("CEREBRAS_MODEL"),
+        "endpoint": "https://api.cerebras.ai/v1",
+        "discover_url": None,
+        "models_fallback": ["llama3.1-8b", "llama-3.3-70b"],
+        "format": "openai"
+    },
+    "openrouter": {
+        "key": os.getenv("OPENROUTER_API_KEY"),
+        "model_env": os.getenv("OPENROUTER_MODEL"),
+        "endpoint": "https://openrouter.ai/api/v1",
+        "discover_url": "https://openrouter.ai/api/v1/models",
+        "models_fallback": ["meta-llama/llama-3.1-8b-instruct:free", "google/gemini-flash-1.5-8b:free"],
+        "format": "openai"
+    },
+    "mistral": {
+        "key": os.getenv("MISTRAL_API_KEY"),
+        "model_env": os.getenv("MISTRAL_MODEL"),
+        "endpoint": "https://api.mistral.ai/v1",
+        "discover_url": "https://api.mistral.ai/v1/models",
+        "models_fallback": ["mistral-small-latest"],
+        "format": "openai"
+    },
+    "cloudflare": {
+        "key": os.getenv("CLOUDFLARE_API_TOKEN"),
+        "model_env": os.getenv("CLOUDFLARE_MODEL", "@cf/meta/llama-3.1-8b-instruct"),
+        "endpoint": f"https://api.cloudflare.com/client/v4/accounts/{os.getenv('CLOUDFLARE_ACCOUNT_ID')}/ai/run/",
+        "discover_url": None,
+        "models_fallback": ["@cf/meta/llama-3.1-8b-instruct", "@cf/mistral/mistral-7b-instruct-v0.1"],
+        "format": "cloudflare"
+    }
 }
-
 AI_BLACKLIST = {}
 AI_STATS = {"fallbacks": 0, "modelos_falhos": {}}
 ai_lock = threading.Lock()
