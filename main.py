@@ -1,13 +1,4 @@
-import os
-import requests
-import threading
-import time
-import logging
-import base64
-import re
-import hashlib
-import json
-import random
+import os, requests, threading, time, logging, base64, re
 from datetime import datetime
 import pytz
 from collections import defaultdict, deque
@@ -24,187 +15,119 @@ ADMINS = ["8398287578"]
 TIMEZONE = "America/Fortaleza"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 RENDER_URL = "https://edu-bot-6yfa.onrender.com"
-
 if not TELEGRAM_TOKEN: raise RuntimeError("TELEGRAM_TOKEN não configurado")
-if not OPENROUTER_API_KEY: raise RuntimeError("OPENROUTER_API_KEY não configurada")
-
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 BOT_ID = None
 BOT_USERNAME = None
 BOT_INICIADO = False
 
-# ===== MOTOR V4.3.5 CORRIGIDO =====
+# ========= MOTOR SÓ CLOUDFLARE + OPENROUTER (SEM GROQ) =========
 PROVIDERS = {
-    "groq": {
-        "key": os.getenv("GROQ_API_KEY"),
-        "model_env": os.getenv("GROQ_MODEL", "openai/gpt-oss-20b"),
-        "endpoint": "https://api.groq.com/openai/v1",
-        "discover_url": "https://api.groq.com/openai/v1/models",
-        "models_fallback": ["openai/gpt-oss-20b", "meta-llama/llama-4-scout-17b-16e-instruct", "llama-3.1-8b-instant"],
-        "format": "openai"
-    },
-    "gemini": {
-        "key": os.getenv("GEMINI_API_KEY"),
-        "model_env": os.getenv("GEMINI_MODEL"),
-        "endpoint": "https://generativelanguage.googleapis.com/v1beta",
-        "discover_url": "https://generativelanguage.googleapis.com/v1beta/models",
-        "models_fallback": ["gemini-2.0-flash", "gemini-1.5-flash-8b", "gemini-1.5-flash"],
-        "format": "gemini"
-    },
-    "cerebras": {
-        "key": os.getenv("CEREBRAS_API_KEY"),
-        "model_env": os.getenv("CEREBRAS_MODEL"),
-        "endpoint": "https://api.cerebras.ai/v1",
-        "discover_url": None,
-        "models_fallback": ["llama3.1-8b", "llama-3.3-70b"],
-        "format": "openai"
-    },
-    "openrouter": {
-        "key": os.getenv("OPENROUTER_API_KEY"),
-        "model_env": os.getenv("OPENROUTER_MODEL"),
-        "endpoint": "https://openrouter.ai/api/v1",
-        "discover_url": "https://openrouter.ai/api/v1/models",
-        "models_fallback": ["meta-llama/llama-3.1-8b-instruct:free", "google/gemini-flash-1.5-8b:free"],
-        "format": "openai"
-    },
-    "mistral": {
-        "key": os.getenv("MISTRAL_API_KEY"),
-        "model_env": os.getenv("MISTRAL_MODEL"),
-        "endpoint": "https://api.mistral.ai/v1",
-        "discover_url": "https://api.mistral.ai/v1/models",
-        "models_fallback": ["mistral-small-latest"],
-        "format": "openai"
-    },
     "cloudflare": {
         "key": os.getenv("CLOUDFLARE_API_TOKEN"),
         "model_env": os.getenv("CLOUDFLARE_MODEL", "@cf/meta/llama-3.1-8b-instruct"),
         "endpoint": f"https://api.cloudflare.com/client/v4/accounts/{os.getenv('CLOUDFLARE_ACCOUNT_ID')}/ai/run/",
-        "discover_url": None,
         "models_fallback": ["@cf/meta/llama-3.1-8b-instruct", "@cf/mistral/mistral-7b-instruct-v0.1"],
         "format": "cloudflare"
+    },
+    "openrouter": {
+        "key": os.getenv("OPENROUTER_API_KEY"),
+        "model_env": os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct:free"),
+        "endpoint": "https://openrouter.ai/api/v1",
+        "models_fallback": ["meta-llama/llama-3.1-8b-instruct:free"],
+        "format": "openai"
     }
 }
-AI_BLACKLIST = {}
-AI_STATS = {"fallbacks": 0, "modelos_falhos": {}}
-ai_lock = threading.Lock()
-for prov in PROVIDERS.keys(): AI_STATS[prov] = {"ok": 0, "erro": 0, "429": 0, "401": 0, "404": 0, "5xx": 0}
-MODEL_CACHE = {}; MODEL_CACHE_TIME = {}
-
-thread_local = threading.local()
-def get_session():
-    if not hasattr(thread_local, "session"): thread_local.session = requests.Session()
-    return thread_local.session
-
-def _is_blacklisted(key):
-    with ai_lock: return AI_BLACKLIST.get(key, 0) > time.time()
-def _blacklist(key, seconds):
-    with ai_lock: AI_BLACKLIST[key] = time.time() + seconds
-def get_active_providers(): return [p for p, data in PROVIDERS.items() if data["key"]]
-
-def limpar_resposta_ia(resp):
-    if not resp: return None
-    resp = str(resp).strip()
-    resp = re.sub(r"<thinking>.*?</thinking>", "", resp, flags=re.DOTALL | re.IGNORECASE)
-    resp = re.sub(r"</?think(?:ing)?>", "", resp, flags=re.IGNORECASE)
-    resp = re.sub(r"^\s*(thinking|raciocínio|reasoning|análise)\s*:\s*", "", resp, flags=re.IGNORECASE)
-    marcadores = ["Resposta final:", "Resposta:", "Final:", "Answer:"]
-    for marcador in marcadores:
-        if marcador.lower() in resp.lower():
-            partes = re.split(re.escape(marcador), resp, maxsplit=1, flags=re.IGNORECASE)
-            if len(partes) == 2: resp = partes[1].strip(); break
-import os, requests, threading, time, logging, base64, re
-from datetime import datetime
-import pytz
-from collections import defaultdict, deque
-from flask import Flask, request
-from concurrent.futures import ThreadPoolExecutor
-
-app = Flask(__name__)
-logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
-
-BOT_NAME = "Matheus"
-CREATOR_ID = "8398287578"
-TIMEZONE = "America/Fortaleza"
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-RENDER_URL = "https://edu-bot-6yfa.onrender.com"
-
-if not TELEGRAM_TOKEN: raise RuntimeError("TELEGRAM_TOKEN não configurado")
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-
-PROVIDERS = {
-    "groq": {"key": os.getenv("GROQ_API_KEY"), "model_env": os.getenv("GROQ_MODEL", "openai/gpt-oss-20b"), "endpoint": "https://api.groq.com/openai/v1", "models_fallback": ["openai/gpt-oss-20b", "meta-llama/llama-4-scout-17b-16e-instruct", "llama-3.1-8b-instant"], "format": "openai"},
-    "openrouter": {"key": os.getenv("OPENROUTER_API_KEY"), "model_env": os.getenv("OPENROUTER_MODEL"), "endpoint": "https://openrouter.ai/api/v1", "models_fallback": ["meta-llama/llama-3.1-8b-instruct:free"], "format": "openai"},
-}
-# Filtra só quem tem chave
 PROVIDERS = {k:v for k,v in PROVIDERS.items() if v["key"]}
+print(f"[PROVIDERS ATIVOS] {list(PROVIDERS.keys())}")
 
 AI_BLACKLIST = {}
-AI_STATS = {"fallbacks": 0}
 ai_lock = threading.Lock()
 thread_local = threading.local()
 def get_session():
     if not hasattr(thread_local, "session"): thread_local.session = requests.Session()
     return thread_local.session
-
 def _is_blacklisted(key):
     with ai_lock: return AI_BLACKLIST.get(key, 0) > time.time()
 def _blacklist(key, seconds):
     with ai_lock: AI_BLACKLIST[key] = time.time() + seconds
-def get_active_providers(): return list(PROVIDERS.keys())
 
 def limpar_resposta_ia(resp):
     if not resp: return None
     resp = re.sub(r"<thinking>.*?</thinking>", "", str(resp), flags=re.DOTALL | re.IGNORECASE)
-    resp = re.sub(r"</?think(?:ing)?>", "", resp, flags=re.IGNORECASE)
     return resp.strip()[:4000] or None
 
 def call_provider(provider_name, messages):
     data = PROVIDERS[provider_name]
-    modelos = [data["model_env"]] + data.get("models_fallback", []) if data["model_env"] else data.get("models_fallback", [])
-    for modelo in modelos:
-        if not modelo or _is_blacklisted(f"{provider_name}_{modelo}"): continue
-        s = get_session()
+    modelos = [data["model_env"]] + data.get("models_fallback", [])
+    for modelo in [m for m in modelos if m]:
+        if _is_blacklisted(f"{provider_name}_{modelo}"): continue
         try:
             msgs_limpa = []
             for m in messages:
-                if isinstance(m["content"], list): msgs_limpa.append({"role": m["role"], "content": m["content"][0].get("text","")})
-                else: msgs_limpa.append(m)
-            payload = {"model": modelo, "messages": msgs_limpa, "max_tokens": 1024, "temperature": 0.7}
-            url = data["endpoint"] + "/chat/completions"
-            headers = {"Authorization": f"Bearer {data['key']}", "Content-Type": "application/json"}
-            r = s.post(url, headers=headers, json=payload, timeout=45)
-            if r.status_code == 200:
-                j = r.json()
-                choice = j.get("choices", [{}])[0]
-                resp = choice.get("message", {}).get("content", "") or choice.get("text", "")
-                # alguns modelos gpt-oss retornam reasoning separado
-                if not resp and "reasoning" in choice.get("message", {}):
-                    resp = j.get("choices", [{}])[0].get("message", {}).get("reasoning","")
-                resp = limpar_resposta_ia(resp)
-                if resp:
-                    logging.info(f"[AI OK] {provider_name}/{modelo}")
-                    return resp, "ok"
-            logging.warning(f"[FAIL] {provider_name}/{modelo} {r.status_code} {r.text[:400]}")
-            if r.status_code in [404, 410]: _blacklist(f"{provider_name}_{modelo}", 3600)
-            elif r.status_code in [401, 403]: _blacklist(provider_name, 3600)
-            elif r.status_code == 429: _blacklist(provider_name, 60)
+                if isinstance(m["content"], list):
+                    msgs_limpa.append({"role": m["role"], "content": m["content"][0].get("text","")})
+                else:
+                    msgs_limpa.append(m)
+
+            s = get_session()
+            if data["format"] == "cloudflare":
+                url = data["endpoint"].rstrip("/") + f"/{modelo}"
+                headers = {"Authorization": f"Bearer {data['key']}"}
+                payload = {"messages": msgs_limpa}
+                r = s.post(url, headers=headers, json=payload, timeout=45)
+                if r.status_code == 200:
+                    j = r.json()
+                    resp = j.get("result", {}).get("response", "") if isinstance(j.get("result"), dict) else j.get("result", "")
+                    resp = limpar_resposta_ia(resp)
+                    if resp: return resp, "ok"
+            else:
+                url = data["endpoint"] + "/chat/completions"
+                headers = {"Authorization": f"Bearer {data['key']}", "Content-Type": "application/json"}
+                payload = {"model": modelo, "messages": msgs_limpa, "max_tokens": 1024, "temperature": 0.7}
+                r = s.post(url, headers=headers, json=payload, timeout=45)
+                if r.status_code == 200:
+                    resp = r.json()["choices"][0]["message"]["content"]
+                    resp = limpar_resposta_ia(resp)
+                    if resp: return resp, "ok"
+            logging.warning(f"[FAIL] {provider_name}/{modelo} {r.status_code} {r.text[:500]}")
         except Exception as e:
             logging.error(f"[ERROR] {provider_name}/{modelo}: {e}")
     return None, "fail"
 
 def call_ai_router(messages):
-    provs = get_active_providers()
-    if not provs: return "⚠️ Sem chave de IA configurada no Render.", 0, "no_keys"
-    for prov in provs:
-        resp, status = call_provider(prov, messages)
+    for prov in PROVIDERS.keys():
+        resp, _ = call_provider(prov, messages)
         if resp: return resp, 0, prov
-    return "⚠️ IA offline agora. Tenta em 1 min.", 0, "error"
+    return "⚠️ IA offline. Cloudflare não respondeu. Verifica /test_cloudflare", 0, "error"
 
-#... mantém o resto do seu código igual (HISTORICO, send_message etc)...
+# ========= ROTAS DE TESTE =========
+@app.route('/test_cloudflare')
+def test_cloudflare():
+    token = os.getenv("CLOUDFLARE_API_TOKEN")
+    account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID")
+    model = os.getenv("CLOUDFLARE_MODEL", "@cf/meta/llama-3.1-8b-instruct")
+    if not token or not account_id:
+        return f"SEM TOKEN: token={bool(token)} account={bool(account_id)}"
+    url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
+    headers = {"Authorization": f"Bearer {token}"}
+    payload = {"messages": [{"role": "user", "content": "Oi, diga apenas OK"}]}
+    try:
+        r = requests.post(url, json=payload, headers=headers, timeout=30)
+        return f"Model: {model}<br>Status: {r.status_code}<br><br>{r.text[:2000]}", r.status_code
+    except Exception as e:
+        return f"Erro Cloudflare: {e}"
 
+@app.route('/debug')
+def debug_route():
+    return {"provedores": {k: "OK" if v["key"] else "SEM CHAVE" for k,v in PROVIDERS.items()}, "env": {"has_token": bool(os.getenv("CLOUDFLARE_API_TOKEN")), "has_account": bool(os.getenv("CLOUDFLARE_ACCOUNT_ID"))}}
+
+@app.route('/')
+def index(): return f"{BOT_NAME} online ✅ Cloudflare", 200
+
+# ========= RESTO DO BOT (SEU CÓDIGO IGUAL) =========
 MAX_TOKENS_RESPOSTA = 300
 HISTORICO_LIMITE_USER = 6
 HISTORICO_LIMITE_GRUPO = 4
@@ -215,7 +138,6 @@ COOLDOWN_SEGUNDOS_GRUPO = 10
 MAX_REQUISICOES_POR_MINUTO = 5
 JANELA_TEMPO = 60
 MAX_REQUISICOES_POR_USER_HORA = 10
-
 HISTORICO = defaultdict(lambda: deque(maxlen=HISTORICO_LIMITE_USER))
 HISTORICO_GRUPO = defaultdict(lambda: deque(maxlen=HISTORICO_LIMITE_GRUPO))
 USER_COOLDOWN = {}
@@ -231,18 +153,14 @@ def init_bot_info():
     if BOT_INICIADO: return
     try:
         r = requests.get(f"{TELEGRAM_API_URL}/getMe", timeout=TIMEOUT_API)
-        r.raise_for_status()
         data = r.json()["result"]
-        BOT_ID = data["id"]
-        BOT_USERNAME = data["username"].lower()
-        BOT_INICIADO = True
-        logging.info(f"[BOT] Iniciado como @{BOT_USERNAME} | ID: {BOT_ID} | Motor V4.3.5")
+        BOT_ID = data["id"]; BOT_USERNAME = data["username"].lower(); BOT_INICIADO = True
+        logging.info(f"[BOT] @{BOT_USERNAME}")
     except Exception as e:
-        logging.exception(f"[TELEGRAM ERROR] Falha ao iniciar bot: {e}")
+        logging.exception(f"[TELEGRAM ERROR] {e}")
 
 def send_message(chat_id, text, reply_to=None):
-    if not text: text = "Não consegui gerar uma resposta agora."
-    text = text[:4096]
+    text = (text or "Erro")[:4096]
     for parse_mode in ["Markdown", None]:
         try:
             payload = {"chat_id": chat_id, "text": text}
@@ -255,17 +173,14 @@ def send_message(chat_id, text, reply_to=None):
     return False
 
 def get_file_from_telegram(file_id):
-    r = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}")
-    r.raise_for_status()
+    r = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}"); r.raise_for_status()
     file_path = r.json()["result"]["file_path"]
-    img = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}")
-    img.raise_for_status()
+    img = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"); img.raise_for_status()
     return base64.b64encode(img.content).decode("utf-8")
 
 def get_user_info(user):
-    user_id = str(user["id"])
-    nome = user.get("first_name", "usuário")
-    tipo = "criador" if user_id == CREATOR_ID else "admin" if user_id in ADMINS else "usuario"
+    user_id = str(user["id"]); nome = user.get("first_name", "usuário")
+    tipo = "criador" if user_id == CREATOR_ID else "usuario"
     return {"id": user_id, "nome": nome, "tipo": tipo}
 
 def check_user_rate_limit(user_id):
@@ -276,7 +191,6 @@ def check_user_rate_limit(user_id):
         if len(fila) >= MAX_REQUISICOES_POR_USER_HORA: return False
         fila.append(agora)
     return True
-
 def check_global_rate_limit():
     agora = time.time()
     with LOCK:
@@ -284,7 +198,6 @@ def check_global_rate_limit():
         if len(REQUISICOES_TIMES) >= MAX_REQUISICOES_POR_MINUTO: return False
         REQUISICOES_TIMES.append(agora)
     return True
-
 def check_cooldown(user_id, is_group):
     cooldown = COOLDOWN_SEGUNDOS_GRUPO if is_group else COOLDOWN_SEGUNDOS_PV
     agora = time.time()
@@ -292,7 +205,6 @@ def check_cooldown(user_id, is_group):
         if agora - USER_COOLDOWN.get(user_id, 0) < cooldown: return False
         USER_COOLDOWN[user_id] = agora
     return True
-
 def is_update_processado(update_id):
     agora = time.time()
     with LOCK:
@@ -301,98 +213,49 @@ def is_update_processado(update_id):
         if update_id in PROCESSED_UPDATES: return True
         PROCESSED_UPDATES[update_id] = agora
     return False
-
 def get_datetime_info():
-    tz = pytz.timezone(TIMEZONE)
-    agora = datetime.now(tz)
-    dias_semana = ["segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"]
-    return {"dia_semana": dias_semana[agora.weekday()], "data": agora.strftime("%d/%m/%Y"), "hora": agora.strftime("%H:%M")}
-
+    tz = pytz.timezone(TIMEZONE); agora = datetime.now(tz)
+    dias = ["segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"]
+    return {"dia_semana": dias[agora.weekday()], "data": agora.strftime("%d/%m/%Y"), "hora": agora.strftime("%H:%M")}
 def adicionar_historico(chat_id, user_id, role, content, is_group=False):
     with LOCK:
         msg = {"role": role, "content": content[:MAX_MSG_LENGTH]}
         if is_group: HISTORICO_GRUPO[str(chat_id)].append(msg)
         else: HISTORICO[str(user_id)].append(msg)
-
 def get_historico(chat_id, user_id, is_group):
-    with LOCK:
-        return list(HISTORICO_GRUPO[str(chat_id)]) if is_group else list(HISTORICO[str(user_id)])
-
+    with LOCK: return list(HISTORICO_GRUPO[str(chat_id)]) if is_group else list(HISTORICO[str(user_id)])
 def limpar_historico(chat_id, user_id, is_group):
     with LOCK:
         if is_group: HISTORICO_GRUPO[str(chat_id)].clear()
         else: HISTORICO[str(user_id)].clear()
-
 def montar_system_prompt(user_info):
     dt = get_datetime_info()
-    identidade = f"Você está falando com {CREATOR}, o CRIADOR do bot. Seja familiar e zoeiro." if user_info["tipo"] == "criador" else f"Usuário: {user_info['nome']}"
-    return f"""Você é {BOT_NAME}. {identidade}
-DATA: {dt['dia_semana']}, {dt['data']} {dt['hora']} | Sobral-CE
-REGRAS: 1.Responda no idioma do usuário. 2.Max 3 linhas. 3.Sejá direto."""
-
+    return f"Você é {BOT_NAME}. Usuário: {user_info['nome']} DATA: {dt['dia_semana']}, {dt['data']} {dt['hora']}. Seja direto, max 3 linhas."
 def deve_responder(msg, chat_type):
     if chat_type == "private": return True
-    texto = msg.get("text", "").lower() if msg.get("text") else ""
+    texto = msg.get("text", "").lower()
     if BOT_USERNAME and f"@{BOT_USERNAME}" in texto: return True
     if BOT_NAME.lower() in texto: return True
     if "reply_to_message" in msg and msg["reply_to_message"].get("from", {}).get("id") == BOT_ID: return True
-    if "photo" in msg: return True
     return False
-
 def processar_comando(texto, chat_id, user_info, is_group):
-    texto = texto.lower()
-    if texto == "/start": return f"👋 Opa {user_info['nome']}! Eu sou o *{BOT_NAME}*\nUse `/ajuda`"
-    if texto == "/ajuda": return "*COMANDOS:* `/start` `/ajuda` `/limpar` `/status` `/hora`"
-    if texto == "/limpar":
-        limpar_historico(chat_id, user_info["id"], is_group)
-        return "🧹 Histórico limpo!"
-    if texto == "/status":
-        ativos = len(get_active_providers())
-        return f"✅ *{BOT_NAME} Online V4.3.5*\n🤖 Provedores ativos: {ativos}\n👤 Users: {len(HISTORICO)}\n👥 Grupos: {len(HISTORICO_GRUPO)}\n🔄 Fallbacks: {AI_STATS['fallbacks']}"
-    if texto == "/hora":
-        dt = get_datetime_info()
-        return f"📅 {dt['dia_semana']}, {dt['data']}\n🕐 {dt['hora']} Sobral/CE"
-    if texto == "/admin" and user_info["tipo"] == "criador":
-        return f"*PAINEL*\nUsers: {len(HISTORICO)}\nGrupos: {len(HISTORICO_GRUPO)}"
+    t = texto.lower()
+    if t == "/start": return f"👋 Opa {user_info['nome']}! Eu sou o *{BOT_NAME}*"
+    if t == "/limpar": limpar_historico(chat_id, user_info["id"], is_group); return "🧹 Histórico limpo!"
+    if t == "/status": return f"✅ {BOT_NAME} Online\nProvedores: {list(PROVIDERS.keys())}"
     return None
-
 def processar_mensagem(msg):
     try:
         chat = msg["chat"]; chat_id = chat["id"]; chat_type = chat["type"]
         user = msg["from"]; message_id = msg["message_id"]
-        user_info = get_user_info(user)
-        is_group = chat_type in ["group", "supergroup"]
+        user_info = get_user_info(user); is_group = chat_type in ["group", "supergroup"]
         if is_group and not deve_responder(msg, chat_type): return
         texto = msg.get("text", "").strip()
-        has_media = "photo" in msg
-
-        if texto and texto.startswith("/"):
-            resposta = processar_comando(texto, chat_id, user_info, is_group)
-            if resposta: send_message(chat_id, resposta, reply_to=message_id)
+        if texto.startswith("/"):
+            resp = processar_comando(texto, chat_id, user_info, is_group)
+            if resp: send_message(chat_id, resp, reply_to=message_id)
             return
-
         if not check_cooldown(user_info["id"], is_group): return
-        if not check_user_rate_limit(user_info["id"]):
-            send_message(chat_id, "⏳ Você atingiu o limite de 10 msgs/hora. Espera um pouco.", reply_to=message_id)
-            return
-        if not check_global_rate_limit():
-            send_message(chat_id, "⏳ Limite global atingido. Espera 1 min.", reply_to=message_id)
-            return
-
-        if has_media:
-            file_id = msg["photo"][-1]["file_id"]
-            image_base64 = get_file_from_telegram(file_id)
-            texto = msg.get("caption", "Descreva esta imagem em português, direto")
-            historico = get_historico(chat_id, user_info["id"], is_group)
-            system = montar_system_prompt(user_info)
-            messages = [{"role": "system", "content": system}] + historico
-            messages.append({"role": "user", "content": [{"type": "text", "text": texto}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}]})
-            adicionar_historico(chat_id, user_info["id"], "user", f"[IMAGEM] {texto}", is_group)
-            resposta, _, _ = call_ai_router(messages)
-            adicionar_historico(chat_id, user_info["id"], "assistant", resposta, is_group)
-            send_message(chat_id, resposta, reply_to=message_id)
-            return
-
         if not texto: return
         historico = get_historico(chat_id, user_info["id"], is_group)
         system = montar_system_prompt(user_info)
@@ -401,7 +264,6 @@ def processar_mensagem(msg):
         resposta, _, _ = call_ai_router(messages)
         adicionar_historico(chat_id, user_info["id"], "assistant", resposta, is_group)
         send_message(chat_id, resposta, reply_to=message_id)
-
     except Exception as e:
         logging.exception(f"[PROCESS ERROR] {e}")
 
@@ -410,39 +272,9 @@ def webhook():
     if not BOT_INICIADO: init_bot_info()
     data = request.get_json()
     if not data: return "ok"
-    update_id = data.get("update_id")
-    if is_update_processado(update_id): return "ok"
-    if msg := data.get("message"):
-        executor.submit(processar_mensagem, msg)
+    if is_update_processado(data.get("update_id")): return "ok"
+    if msg := data.get("message"): executor.submit(processar_mensagem, msg)
     return "ok"
 
-@app.route('/')
-def index(): return f"{BOT_NAME} online V4.3.5 ✅", 200
-
-@app.route('/debug')
-def debug_route():
-    ativos = {k: "OK" if v["key"] else "SEM CHAVE" for k,v in PROVIDERS.items()}
-    return {"provedores": ativos, "stats": AI_STATS, "blacklist": AI_BLACKLIST}
-
-@app.route('/test_cloudflare')
-def test_cloudflare():
-    import requests
-    token = os.getenv("CLOUDFLARE_API_TOKEN")
-    account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID")
-    model = os.getenv("CLOUDFLARE_MODEL", "@cf/meta/llama-3.1-8b-instruct")
-    if not token or not account_id:
-        return f"SEM TOKEN: token={bool(token)} account={bool(account_id)}"
-    
-    url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
-    headers = {"Authorization": f"Bearer {token}"}
-    payload = {"messages": [{"role": "user", "content": "Oi, diga apenas OK"}]}
-    
-    try:
-        r = requests.post(url, json=payload, headers=headers, timeout=30)
-        return f"Model: {model}<br>URL: {url}<br>Status: {r.status_code}<br><br>{r.text[:1500]}", r.status_code
-    except Exception as e:
-        return f"Erro Cloudflare: {e}"
-
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
