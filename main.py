@@ -24,7 +24,7 @@ BOT_USERNAME = None
 BOT_INICIADO = False
 
 # ========= MOTOR SÓ CLOUDFLARE + OPENROUTER (SEM GROQ) =========
-PROVIDERS_RAW = {
+PROVIDERS = {
     "groq": {
         "key": os.getenv("GROQ_API_KEY"), 
         "model_env": os.getenv("GROQ_MODEL", "openai/gpt-oss-20b"), 
