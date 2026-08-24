@@ -24,20 +24,55 @@ BOT_USERNAME = None
 BOT_INICIADO = False
 
 # ========= MOTOR SÓ CLOUDFLARE + OPENROUTER (SEM GROQ) =========
-PROVIDERS = {
+PROVIDERS_RAW = {
+    "groq": {
+        "key": os.getenv("GROQ_API_KEY"), 
+        "model_env": os.getenv("GROQ_MODEL", "openai/gpt-oss-20b"), 
+        "endpoint": "https://api.groq.com/openai/v1", 
+        "models_fallback": ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "gemma2-9b-it", "meta-llama/llama-4-scout", "qwen/qwen3-32b"], 
+        "format": "openai", 
+        "timeout": 10
+    },
+    "cerebras": {
+        "key": os.getenv("CEREBRAS_API_KEY"), 
+        "model_env": os.getenv("CEREBRAS_MODEL", "llama-3.3-70b"), 
+        "endpoint": "https://api.cerebras.ai/v1", 
+        "models_fallback": ["llama3.1-8b", "llama-3.3-70b"], 
+        "format": "openai", 
+        "timeout": 10
+    },
+    "gemini": {
+        "key": os.getenv("GEMINI_API_KEY"), 
+        "model_env": os.getenv("GEMINI_MODEL", "gemini-2.5-flash"), 
+        "endpoint": "https://generativelanguage.googleapis.com/v1beta", 
+        "models_fallback": ["gemini-2.0-flash", "gemini-1.5-flash-latest"], 
+        "format": "gemini", 
+        "timeout": 12
+    },
     "cloudflare": {
         "key": os.getenv("CLOUDFLARE_API_TOKEN"),
         "model_env": os.getenv("CLOUDFLARE_MODEL", "@cf/meta/llama-3.1-8b-instruct"),
         "endpoint": f"https://api.cloudflare.com/client/v4/accounts/{os.getenv('CLOUDFLARE_ACCOUNT_ID')}/ai/run/",
         "models_fallback": ["@cf/meta/llama-3.1-8b-instruct", "@cf/mistral/mistral-7b-instruct-v0.1"],
-        "format": "cloudflare"
+        "format": "cloudflare",
+        "timeout": 12,
+        "requires": ["CLOUDFLARE_ACCOUNT_ID"]
     },
     "openrouter": {
         "key": os.getenv("OPENROUTER_API_KEY"),
-        "model_env": os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct:free"),
+        "model_env": os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-20b:free"),
         "endpoint": "https://openrouter.ai/api/v1",
-        "models_fallback": ["meta-llama/llama-3.1-8b-instruct:free"],
-        "format": "openai"
+        "models_fallback": ["openai/gpt-oss-20b:free", "meta-llama/llama-4-scout:free", "qwen/qwen3-32b:free"],
+        "format": "openai",
+        "timeout": 12
+    },
+    "mistral": {
+        "key": os.getenv("MISTRAL_API_KEY"), 
+        "model_env": os.getenv("MISTRAL_MODEL", "mistral-small-latest"), 
+        "endpoint": "https://api.mistral.ai/v1", 
+        "models_fallback": ["mistral-large-latest"], 
+        "format": "openai", 
+        "timeout": 10
     }
 }
 PROVIDERS = {k:v for k,v in PROVIDERS.items() if v["key"]}
