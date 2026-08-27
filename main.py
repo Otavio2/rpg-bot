@@ -171,7 +171,7 @@ def call_provider(provider_name, cfg, messages, time_left_fn):
                 url=f"{cfg['endpoint'].rstrip('/')}/chat/completions"
                 headers={"Authorization":f"Bearer {cfg['key']}","Content-Type":"application/json"}
                 timeout=min(cfg.get("timeout",6), max(2, int(time_left_fn()-1)))
-                payload={"model":modelo,"messages":messages,"temperature":0.7,"max_tokens":800}
+                payload={"model":modelo,"messages":messages,"temperature":1.0,"max_tokens":800}
                 r=sess.post(url,json=payload,headers=headers,timeout=timeout)
                 elapsed=int((time.time()-t0)*1000)
                 with ai_lock: AI_STATS[provider_name]["total_requests"]+=1; AI_STATS[provider_name]["total_ms"]+=elapsed; AI_STATS[provider_name]["avg_ms"]=AI_STATS[provider_name]["total_ms"]//AI_STATS[provider_name]["total_requests"]
